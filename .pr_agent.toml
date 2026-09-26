@@ -1,0 +1,69 @@
+# Global Qodo pr-agent configuration for webuildstuffio org
+# This file is the SSOT for review behavior across all repos.
+# Per-repo .pr_agent.toml overrides any setting here.
+# Docs: https://qodo-merge-docs.qodo.ai/usage-guide/configuration_options/#global-configuration-file
+
+[config]
+# Model: openrouter/free is the eternal router — auto-picks any live free model.
+# Never rots. Quality varies but eliminates all model maintenance.
+model = "openrouter/free"
+fallback_models = []
+custom_model_max_tokens = 131072
+
+# Context: auto-load repo docs into every review prompt
+repo_context_files = ["AGENTS.md", "README.md", "CLAUDE.md"]
+repo_context_max_lines = 300
+
+# Lean output
+verbosity_level = 0
+output_run_details = false
+output_run_cost = false
+temperature = 0.2
+
+[github_action_config]
+# /improve only — inline code suggestions are the highest-value output.
+# /review and /describe are available via manual /command but not auto.
+auto_review = false
+auto_describe = false
+auto_improve = true
+
+[pr_code_suggestions]
+commitable_code_suggestions = true
+suggestions_score_threshold = 8
+max_suggestions_per_file = 2
+num_code_suggestions_per_chunk = 3
+num_best_practice_suggestions = 2
+focus_only_on_problems = true
+suggestions_depth = "exhaustive"
+publish_output_no_suggestions = false
+persistent_inline_comments = true
+extra_instructions = """\
+Be terse. Max 2 sentences per suggestion. Only severity 8+/10.
+Skip cosmetic, formatting, naming, and documentation suggestions.
+Focus on: bugs, security, correctness, performance, error handling.
+"""
+
+[pr_reviewer]
+# Not auto-triggered, but available via /review command
+num_max_findings = 3
+require_security_review = true
+require_risk_assessment = true
+require_merge_recommendation = true
+require_tests_review = false
+require_score_review = false
+require_estimate_effort_to_review = false
+enable_review_labels_security = false
+enable_review_labels_effort = false
+final_update_message = false
+extra_instructions = """\
+Severity 8+/10 only. Max 1 sentence per finding.
+No praise, no summaries. Only actionable issues.
+"""
+
+[pr_description]
+# Not auto-triggered, but available via /describe command
+publish_labels = false
+generate_ai_title = false
+enable_pr_diagram = false
+add_original_user_description = true
+include_generated_by_header = false
