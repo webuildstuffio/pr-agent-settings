@@ -1,10 +1,12 @@
-# Qodo AI Code Suggestions v3.3
+# Qodo AI Code Suggestions v3.3.1
 # Inline code suggestions only — the highest-value, lowest-noise output.
 # All config lives in webuildstuffio/pr-agent-settings/.pr_agent.toml (global)
-# and per-repo .pr_agent.toml (overrides). This workflow is intentionally minimal.
+# and per-repo .pr_agent.toml (overrides). This workflow is intentionally
+# minimal.
 #
 # Model: google/gemma-4-31b-it:free primary, 8-model :free fallback chain.
-# API: direct OpenRouter (no AI Gateway proxy — CF gateway corrupts streaming).
+# API: direct OpenRouter (no AI Gateway proxy — CF gateway corrupts
+# streaming).
 # DO NOT use openrouter/free as primary — proven broken (silent no-reviews).
 # NOTE: webuildstuffio/pr-agent-settings MUST stay PUBLIC — the default
 # GITHUB_TOKEN cannot read it as a private repo (404), which silently drops
@@ -12,6 +14,9 @@
 # /review and /describe available via manual /command in PR comments.
 #
 # CHANGELOG:
+# v3.3.1: (Sep 30 2026) Scope concurrency group by event name — a
+#          comment-triggered run (skips in ~1s) must never cancel an
+#          in-progress pull_request run.
 # v3.3.0: (Sep 30 2026) Concurrency groups, improved caching, permission polish.
 # v3.2.1: (Sep 29 2026) Bypass CF AI Gateway — route directly to OpenRouter.
 # v3.2.0: (Sep 29 2026) gemma-4-31b primary + 8-model :free fallback chain.
@@ -31,7 +36,18 @@ name: Qodo AI Code Suggestions
         type: string
 
 concurrency:
-  group: qodo-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+  # Group includes the event type. The workflow also fires on issue_comment (for
+  # manual /improve), and EVERY comment on a PR (CI bot reports, review
+  # threads) shares group qodo-<PR#> with the in-progress pull_request
+  # suggestions run — without the event name, cancel-in-progress kills Qodo
+  # mid-run and the comment-run then skips in ~1s. Seen 2026-09-29/30:
+  # shell-config#499, folio-app#2596/#2597. Same-event-type dedup is
+  # preserved: reopen cancels a stale open-run, a newer /improve supersedes
+  # an older one.
+  group: >-
+    qodo-${{ github.event_name }}-${{
+      github.event.pull_request.number || github.event.issue.number ||
+      github.run_id }}
   cancel-in-progress: true
 
 jobs:
