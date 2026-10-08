@@ -81,7 +81,7 @@ jobs:
     name: Code Suggestions (free models)
     steps:
       - name: Docker Cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /var/lib/docker
           key: qodo-docker-${{ runner.os }}
@@ -102,7 +102,7 @@ jobs:
             else { core.setFailed('No open PRs'); }
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Run Qodo /improve
         uses: qodo-ai/pr-agent@v0.46.0
