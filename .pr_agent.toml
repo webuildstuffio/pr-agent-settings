@@ -4,12 +4,13 @@
 # Docs: https://qodo-merge-docs.qodo.ai/usage-guide/configuration_options/#global-configuration-file
 
 [config]
-# Model: gemma-4-31b-it:free primary + 7-model :free fallback chain.
-# qwen/qwen3.8-27b:free free slug retired 2026-10 (OpenRouter 404) — removed.
-# openrouter/free as PRIMARY verified silent-broken 2026-10-09 (run reported
-# success, published nothing) — last-resort fallback only, never primary.
+# Model: gemma-4-31b-it:free primary + 10-model :free fallback chain.
+# Expanded 2026-10-09 (owner: more free models + retry depth;
+# ling-3.0 retired -> ling-3.1). openrouter/free as PRIMARY verified
+# silent-broken 2026-10-09 — last-resort fallback only, never primary.
 model = "openrouter/google/gemma-4-31b-it:free"
-fallback_models = ["openrouter/nvidia/nemotron-3-ultra-550b-a55b:free", "openrouter/nvidia/nemotron-3-super-120b-a12b:free", "openrouter/cohere/north-mini-code:free", "openrouter/inclusionai/ling-3.0-flash-sante:free", "openrouter/nvidia/nemotron-3.5-lightning:free", "openrouter/poolside/laguna-s-2.1:free", "openrouter/free"]
+fallback_models = ["openrouter/nvidia/nemotron-3-ultra-550b-a55b:free", "openrouter/nvidia/nemotron-3-super-120b-a12b:free", "openrouter/cohere/north-mini-code:free", "openrouter/inclusionai/ling-3.1-flash", "openrouter/nvidia/nemotron-3.5-lightning:free", "openrouter/poolside/laguna-s-2.1:free", "openrouter/google/gemma-4-26b-a4b-it:free", "openrouter/poolside/laguna-xs-2.1:free", "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", "openrouter/free"]
+num_retries = 3
 custom_model_max_tokens = 131072
 
 # Context: auto-load repo docs into every review prompt
