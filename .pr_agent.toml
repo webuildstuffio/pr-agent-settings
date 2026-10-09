@@ -4,9 +4,12 @@
 # Docs: https://qodo-merge-docs.qodo.ai/usage-guide/configuration_options/#global-configuration-file
 
 [config]
-# Model: openrouter/free primary (anti-model-rot, owner order 2026-10-09).
-model = "openrouter/free"
-fallback_models = ["openrouter/free"]
+# Model: gemma-4-31b-it:free primary + 7-model :free fallback chain.
+# qwen/qwen3.8-27b:free free slug retired 2026-10 (OpenRouter 404) — removed.
+# openrouter/free as PRIMARY verified silent-broken 2026-10-09 (run reported
+# success, published nothing) — last-resort fallback only, never primary.
+model = "openrouter/google/gemma-4-31b-it:free"
+fallback_models = ["openrouter/nvidia/nemotron-3-ultra-550b-a55b:free", "openrouter/nvidia/nemotron-3-super-120b-a12b:free", "openrouter/cohere/north-mini-code:free", "openrouter/inclusionai/ling-3.0-flash-sante:free", "openrouter/nvidia/nemotron-3.5-lightning:free", "openrouter/poolside/laguna-s-2.1:free", "openrouter/free"]
 custom_model_max_tokens = 131072
 
 # Context: auto-load repo docs into every review prompt
