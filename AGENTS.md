@@ -5,7 +5,7 @@ Org-wide AI code-review configuration for the webuildstuffio GitHub org. This re
 ## Stack
 
 - **Qodo pr-agent** `v0.46.0` (Docker action) — inline code suggestions on PRs
-- **claude-code-action** `v1.0.233` — `@claude` task automation in issues/PRs
+- **claude-code-action** `v1.0.233` — powers the `@claude` task automation in issues/PRs
 - **GitHub Actions** on `ubicloud-standard-2` runners (label declared in `.github/actionlint.yaml`, required for actionlint to pass)
 - Supporting actions: `actions/checkout@v4`, `actions/cache@v4`, `actions/github-script@v7`
 - No package manager, no build, no test suite. Validation = actionlint + review.
@@ -14,8 +14,8 @@ Org-wide AI code-review configuration for the webuildstuffio GitHub org. This re
 
 - `.pr_agent.toml` — SSOT for pr-agent behavior org-wide. A per-repo `.pr_agent.toml` overrides any setting here.
 - `.github/workflows/qodo-review.yml` — auto-runs `/improve` on PR open/reopen (skips drafts + dependabot); `/review` and `/describe` only via manual PR comments. Calls pr-agent directly against OpenRouter.
-- `.github/workflows/claude.yml` — triggers on `@claude` mentions (issues, PR comments, reviews); runs Claude Code with broad write permissions.
-- Review data flow: PR opened → pr-agent loads `AGENTS.md` + `README.md` + `CLAUDE.md` via `repo_context_files` (first 300 lines, `repo_context_max_lines = 300`) → inline suggestions posted to the PR.
+- `.github/workflows/claude.yml` — the `@claude` automation workflow: triggers on `@claude` mentions (issues, PR comments, reviews) and runs the task agent with broad write permissions.
+- Review data flow: PR opened → pr-agent loads the repo context files (`AGENTS.md`, `README.md`, and a `CLAUDE.md` if one is present) via `repo_context_files` (first 300 lines, `repo_context_max_lines = 300`) → inline suggestions posted to the PR.
 
 ## Conventions
 
