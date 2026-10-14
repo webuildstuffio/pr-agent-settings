@@ -85,8 +85,12 @@ jobs:
         uses: actions/cache@v6
         with:
           path: /var/lib/docker
-          key: qodo-docker-${{ runner.os }}
-          restore-keys: qodo-docker-
+          # Key carries the pr-agent version: with a bare constant key
+          # the first-saved Docker store would be served forever while
+          # the action pin below moves on. Bump the suffix whenever the
+          # qodo-ai/pr-agent pin changes. (Fleet cache audit 2026-10-14)
+          key: qodo-docker-${{ runner.os }}-pragent-0.46.0
+          restore-keys: qodo-docker-${{ runner.os }}-
 
       - name: Set PR for manual runs
         if: github.event_name == 'workflow_dispatch'
