@@ -4,13 +4,14 @@
 # Docs: https://qodo-merge-docs.qodo.ai/usage-guide/configuration_options/#global-configuration-file
 
 [config]
-# Model: gemma-4-31b-it:free primary + 10-model :free fallback chain.
-# Expanded 2026-10-09 (owner: more free models + retry depth;
-# ling-3.0 retired -> ling-3.1). openrouter/free as PRIMARY verified
+# Model: gemma-4-31b-it:free primary + trimmed 3-model :free fallback chain.
+# Trimmed 2026-10-17 (owner: 3 proven free models only, retries 1,
+# ai_timeout 90s per call). openrouter/free as PRIMARY verified
 # silent-broken 2026-10-09 — last-resort fallback only, never primary.
 model = "openrouter/google/gemma-4-31b-it:free"
-fallback_models = ["openrouter/nvidia/nemotron-3-ultra-550b-a55b:free", "openrouter/nvidia/nemotron-3-super-120b-a12b:free", "openrouter/cohere/north-mini-code:free", "openrouter/inclusionai/ling-3.1-flash", "openrouter/nvidia/nemotron-3.5-lightning:free", "openrouter/poolside/laguna-s-2.1:free", "openrouter/google/gemma-4-26b-a4b-it:free", "openrouter/poolside/laguna-xs-2.1:free", "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", "openrouter/free"]
-num_retries = 3
+fallback_models = ["openrouter/nvidia/nemotron-3-ultra-550b-a55b:free", "openrouter/google/gemma-4-26b-a4b-it:free", "openrouter/free"]
+num_retries = 1
+ai_timeout = 90
 custom_model_max_tokens = 131072
 
 # Context: auto-load repo docs into every review prompt
