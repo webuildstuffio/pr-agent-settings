@@ -1,0 +1,835 @@
+# Vendored Opengrep SAST — do NOT replace with a `uses:` caller.
+#
+# This repo is PUBLIC and the fleet security-scan reusable lives
+# in the PRIVATE webuildstuffio/repo-review repo. Public repos
+# cannot call private reusable workflows (GitHub 422), so the
+# Opengrep legs from repo-review#354 are vendored here,
+# self-contained. Leg structure, tool pins and scan logic follow
+# the reusable at:
+#   repo-review .github/workflows/security-scan-reusable.yml
+#   @ 6e6012b09e8e43fd8ab5e9c7f897036565ab7475 (v1.9.0)
+#
+# Semantics (ruleset v3, same as the reusable):
+# - GATE tier: `p/ci` alone (+ the bun minimum-release-age rule
+#   excluded), diff-only via --baseline-commit on PRs. New gated
+#   ERRORs fail the job (carve-outs encoded in og_gated_errors:
+#   detect-child-process, the qodo-review.yml allowlist, and the
+#   secrets-inherit thin-caller templates).
+# - BREADTH tier: the resolved v2 ruleset (routed registry packs
+#   + the inlined custom ai-agent rules below), report-only —
+#   it never fails the job.
+# - Zizmor: GitHub-Actions audit, report-only; on PRs it runs
+#   only when the diff touches .github/workflows/**, on the
+#   weekly deep run it audits all workflows.
+#
+# Deliberate differences from the reusable:
+# - The legs live in this sibling file; the repo's existing
+#   vendored security-scan.yml (Betterleaks/osv/Trivy) is
+#   untouched, and there is no dashboard ingest step (ingest
+#   needs the private REPO_REVIEW_INGEST_TOKEN secret). Results
+#   stay visible in the run summary + annotations.
+# - Sequential steps instead of the reusable's parallel group,
+#   and a direct checksum-verified tool install per run instead
+#   of the shared tool cache (one less moving part vendored).
+# - The weekly deep run is report-only for every tier (full
+#   scans, no baseline, no og-deep-state incremental state):
+#   enforcement lives in the PR gate leg, where the baseline
+#   diff makes "new ERRORs" exact.
+#
+# Tools (checksum-verified release downloads, exact pins):
+#   Opengrep CE 1.30.0, Zizmor 1.30.1
+
+name: security-scan-opengrep
+'on':
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  schedule:
+    - cron: '0 9 * * 1' # Mondays 09:00 UTC — weekly deep scan
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  TOOLS_DIR: ${{ github.workspace }}/../security-tools
+  # Opengrep CE pinned 1.30.0 (#354) — the fleet's local-hook
+  # version. The manylinux binary ships no checksums file, so
+  # the sha256 of the release asset is pinned here, computed
+  # from the v1.30.0 release download, verified per install.
+  OPENGREP_VERSION: "1.30.0"
+  OPENGREP_SHA256: >-
+    35779bdd72e92129c8df2a77f0c55e8c08356801ea92591ef32108d6b28d564c
+  # Zizmor pinned 1.30.1 (#354 phase A) — sha256 of the
+  # x86_64-unknown-linux-gnu release tarball, verified per
+  # install.
+  ZIZMOR_VERSION: "1.30.1"
+  ZIZMOR_SHA256: >-
+    e65324f4430c2717591937edcec90ccbefaf14c174f8ec9415e03ca875b46e1a
+
+jobs:
+  sast:
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.draft == false
+    runs-on: ubicloud-standard-2
+    timeout-minutes: 25
+    concurrency:
+      group: security-scan-opengrep-inner-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0 # history needed for baseline diff
+
+      - name: Determine base, head and scan kind
+        id: scope
+        run: |
+          set -euo pipefail
+          EVENT="${{ github.event_name }}"
+          if [ "$EVENT" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          else
+            BASE=""
+            HEAD_SHA="${{ github.sha }}"
+          fi
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          echo "head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT" = "pull_request" ]; then
+            echo "deep=false" >> "$GITHUB_OUTPUT"
+            echo "kind=pr-fast" >> "$GITHUB_OUTPUT"
+          else
+            echo "deep=true" >> "$GITHUB_OUTPUT"
+            echo "kind=weekly-deep" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deep-scan skip-if-quiet gate
+        id: activity
+        if: steps.scope.outputs.deep == 'true'
+        run: |
+          if [ -z "$(git log --since='7 days ago' --format=%H)" ]; then
+            echo "active=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping deep scan: no commits in 7 days."
+          else
+            echo "active=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Opengrep and Zizmor (checksum-verified)
+        id: og-install
+        if: steps.activity.outputs.active != 'false'
+        run: |
+          set -uo pipefail
+          mkdir -p "$TOOLS_DIR/bin"
+          og_tmp="$(mktemp -d)"
+          og_url="https://github.com/opengrep/opengrep/releases"
+          og_url="$og_url/download/v$OPENGREP_VERSION"
+          if curl -fsSL --retry 3 -o "$og_tmp/opengrep" \
+              "$og_url/opengrep_manylinux_x86" \
+            && echo "$OPENGREP_SHA256  $og_tmp/opengrep" \
+              | sha256sum --check -; then
+            install -m 755 "$og_tmp/opengrep" \
+              "$TOOLS_DIR/bin/opengrep"
+          else
+            echo "::warning::opengrep install failed —" \
+              "SAST legs will report not-scanned."
+          fi
+          rm -rf "$og_tmp"
+          zm_tmp="$(mktemp -d)"
+          zm_tgz="zizmor-x86_64-unknown-linux-gnu.tar.gz"
+          zm_url="https://github.com/zizmorcore/zizmor/releases"
+          zm_url="$zm_url/download/v$ZIZMOR_VERSION/$zm_tgz"
+          if curl -fsSL --retry 3 -o "$zm_tmp/z.tgz" "$zm_url" \
+            && echo "$ZIZMOR_SHA256  $zm_tmp/z.tgz" \
+              | sha256sum --check -; then
+            tar -xzf "$zm_tmp/z.tgz" -C "$zm_tmp" zizmor
+            install -m 755 "$zm_tmp/zizmor" "$TOOLS_DIR/bin/zizmor"
+          else
+            echo "::warning::zizmor install failed —" \
+              "zizmor leg will report not-scanned."
+          fi
+          rm -rf "$zm_tmp"
+          export PATH="$TOOLS_DIR/bin:$PATH"
+          opengrep --version || true
+          zizmor --version || true
+
+      - name: Opengrep prep (ruleset resolve)
+        id: opengrep-prep
+        if: steps.activity.outputs.active != 'false'
+        env:
+          SCAN_BASE: ${{ steps.scope.outputs.base }}
+          DEEP_INPUT: ${{ steps.scope.outputs.deep }}
+        run: |
+          set -uo pipefail
+          # Ruleset v2 custom rules (25 kept ai-agent rules).
+          # SSOT: worker/scripts/opengrep/ai-agent-security-v2.yml
+          # in repo-review — inlined verbatim from the reusable
+          # (a public repo's GITHUB_TOKEN cannot read that
+          # private repo).
+          # BEGIN inlined opengrep-rules-v2
+          cat > /tmp/og-rules-v2.yml <<'OG_RULES_EOF'
+          # yamllint disable
+          # ai-agent-security-v2.yml -- Opengrep custom rules,
+          # ruleset v2 (repo-review#354). Provenance: filtered
+          # from shell-config's .opengrep/rules/
+          # ai-agent-security.yml by the 2026-10-21 fleet
+          # Opengrep experiment round 2 (25 of 32 rules kept).
+          # REMOVED -- the two broken families (68% of round-1
+          # noise, fired on ordinary code):
+          #   javascript-prompt-injection-template,
+          #   javascript-prompt-injection-concat,
+          #   python-prompt-injection-{fstring,format,percent,concat},
+          #   javascript-tool-no-validation
+          # Those stay report-only/local until rewritten
+          # name-anchored.
+          rules:
+          - id: python-llm-call-user-input
+            pattern-either:
+            - pattern: 'openai.$FUNC(..., messages=[{"role": "user", "content": $INPUT}], ...)'
+            - pattern: 'openai.$FUNC(..., messages=[{''role'': ''user'', ''content'': $INPUT}],
+                ...)'
+            message: Direct user input to LLM call (sanitize first)
+            languages:
+            - python
+            severity: WARNING
+            metadata:
+              category: security
+              remediation: Use input sanitization and allowlist patterns
+          - id: mcp-sampling-all-servers-context
+            pattern: 'includeContext: "allServers"'
+            message: MCP sampling with broad context access (data exfiltration risk)
+            languages:
+            - yaml
+            - json
+            severity: ERROR
+            metadata:
+              category: security
+              impact: May allow MCP server to access data from other servers
+              reference: https://authzed.com/blog/timeline-mcp-breaches/
+          - id: mcp-sampling-all-context
+            pattern: 'includeContext: "all"'
+            message: MCP sampling with all context access (review if necessary)
+            languages:
+            - yaml
+            - json
+            severity: WARNING
+            metadata:
+              category: security
+              remediation: Use 'ownServer' or specify exact servers
+          - id: mcp-unrestricted-permissions
+            pattern: "permissions:\n  - \"*\"\n"
+            message: Wildcard MCP permissions (specify exact permissions)
+            languages:
+            - yaml
+            - json
+            severity: ERROR
+            metadata:
+              category: security
+              remediation: Use exact permission names instead of wildcard
+          - id: mcp-disabled-authentication
+            pattern: 'authentication: "none"'
+            message: MCP server without authentication (security risk)
+            languages:
+            - yaml
+            - json
+            severity: ERROR
+            metadata:
+              category: security
+              remediation: Enable authentication for MCP servers
+          - id: mcp-unrestricted-resource-access
+            pattern: "resources:\n  - \"*\"\n"
+            message: Unrestricted MCP resource access (specify exact resources)
+            languages:
+            - yaml
+            - json
+            severity: ERROR
+            metadata:
+              category: security
+              remediation: Specify exact resource paths instead of wildcard
+          - id: mcp-cross-tenant-access
+            pattern: 'allowCrossTenantAccess: true'
+            message: MCP cross-tenant access enabled (data privacy risk)
+            languages:
+            - yaml
+            - json
+            severity: ERROR
+            metadata:
+              category: security
+              impact: May allow accessing data across tenant boundaries
+              reference: Asana MCP breach (June 2025)
+          - id: mcp-broad-server-access
+            pattern: 'serverAccess: "all"'
+            message: MCP with broad server access (specify exact servers)
+            languages:
+            - yaml
+            - json
+            severity: ERROR
+            metadata:
+              category: security
+              remediation: Specify exact server names instead of 'all'
+          - id: typescript-tool-any-type
+            pattern: 'const $TOOL = async ($PARAMS: any) => ...'
+            message: Tool with 'any' type (no schema validation)
+            languages:
+            - typescript
+            severity: ERROR
+            metadata:
+              category: security
+              remediation: Use Zod or similar schema validation library
+              impact: May allow injection attacks via tool parameters
+          - id: python-tool-no-validation
+            pattern: "def $TOOL($PARAMS):\n    return $FUNC($PARAMS)\n"
+            message: Tool function without parameter validation
+            languages:
+            - python
+            severity: ERROR
+            metadata:
+              category: security
+              remediation: Use Pydantic or similar validation library
+              impact: May allow injection attacks via tool parameters
+          - id: python-tool-exec-code-param
+            pattern: exec($PARAMS)
+            message: Tool executes code from parameters without validation
+            languages:
+            - python
+            severity: ERROR
+            metadata:
+              category: security
+              impact: Remote code execution vulnerability
+              reference: CVE-2025-6514 (mcp-remote RCE)
+          - id: typescript-tool-eval-param
+            pattern: eval($PARAMS.$PROP)
+            message: Tool evaluates code from parameters (RCE risk)
+            languages:
+            - typescript
+            - javascript
+            severity: ERROR
+            metadata:
+              category: security
+              impact: Remote code execution vulnerability
+          - id: python-tool-subprocess-param
+            pattern: subprocess.run($PARAMS, shell=True)
+            message: Tool runs subprocess with parameters (command injection risk)
+            languages:
+            - python
+            severity: ERROR
+            metadata:
+              category: security
+              impact: Command injection vulnerability
+          - id: python-hardcoded-openai-key
+            pattern: api_key = "sk-..."
+            message: Hardcoded OpenAI API key (use environment variables)
+            languages:
+            - python
+            severity: ERROR
+            metadata:
+              category: security
+              remediation: Use os.getenv('OPENAI_API_KEY') instead
+          - id: python-hardcoded-anthropic-key
+            pattern: api_key = "sk-ant-..."
+            message: Hardcoded Anthropic API key (use environment variables)
+            languages:
+            - python
+            severity: ERROR
+            metadata:
+              category: security
+              remediation: Use os.getenv('ANTHROPIC_API_KEY') instead
+          - id: javascript-hardcoded-llm-key
+            pattern: 'apiKey: "sk-..."'
+            message: Hardcoded LLM API key in object (use environment variables)
+            languages:
+            - javascript
+            - typescript
+            severity: ERROR
+            metadata:
+              category: security
+              remediation: Use process.env.API_KEY instead
+          - id: env-llm-key-not-from-env
+            pattern: 'const apiKey = "sk-..."
+
+              '
+            message: LLM API key not from environment variable
+            languages:
+            - javascript
+            - typescript
+            severity: ERROR
+            metadata:
+              category: security
+              remediation: Use process.env to load API keys
+          - id: python-autonomous-system-command
+            pattern: subprocess.run($CMD, shell=True)
+            message: Autonomous system command execution (add human approval)
+            languages:
+            - python
+            severity: WARNING
+            metadata:
+              category: security
+              remediation: Add human-in-the-loop approval for dangerous operations
+          - id: python-autonomous-file-delete
+            pattern: 'os.remove($PATH)
+
+              '
+            message: Autonomous file deletion (add human approval)
+            languages:
+            - python
+            severity: WARNING
+            metadata:
+              category: security
+              remediation: Add human-in-the-loop approval for destructive operations
+          - id: python-autonomous-file-write
+            pattern: "with open($PATH, \"w\") as f:\n    f.write($DATA)\n"
+            message: Autonomous file write operation (review if necessary)
+            languages:
+            - python
+            severity: INFO
+            metadata:
+              category: security
+          - id: javascript-autonomous-system-command
+            pattern: 'exec($CMD)
+
+              '
+            message: Autonomous system command execution (add human approval)
+            languages:
+            - javascript
+            - typescript
+            severity: WARNING
+            metadata:
+              category: security
+              remediation: Add human-in-the-loop approval for dangerous operations
+          - id: mcp-server-access-all-databases
+            pattern: 'databases: ["*"]'
+            message: MCP server with wildcard database access
+            languages:
+            - yaml
+            - json
+            severity: ERROR
+            metadata:
+              category: security
+              remediation: Specify exact database names
+          - id: mcp-server-access-all-tables
+            pattern: 'tables: ["*"]'
+            message: MCP server with wildcard table access
+            languages:
+            - yaml
+            - json
+            severity: ERROR
+            metadata:
+              category: security
+              remediation: Specify exact table names
+          - id: mcp-broad-file-access
+            pattern: 'allowedPaths: "/*"'
+            message: MCP server with broad file system access
+            languages:
+            - yaml
+            - json
+            severity: ERROR
+            metadata:
+              category: security
+              remediation: Restrict to specific directories
+          - id: python-llm-unrestricted-tool-access
+            pattern: tools=$ALL_TOOLS
+            message: LLM with unrestricted tool access (specify exact tools)
+            languages:
+            - python
+            severity: WARNING
+            metadata:
+              category: security
+              remediation: Specify exact tool list instead of wildcard
+          OG_RULES_EOF
+          # END inlined opengrep-rules-v2
+          # Baseline for the diff-only PR scans: the PR base
+          # SHA when it exists in this checkout; empty on the
+          # deep path (full scans there are report-only).
+          : > /tmp/og-base.txt
+          if [ "$DEEP_INPUT" != "true" ]; then
+            BASE="$SCAN_BASE"
+            if [ -n "$BASE" ] && git cat-file -e "$BASE" \
+              2>/dev/null; then
+              printf '%s' "$BASE" > /tmp/og-base.txt
+            fi
+          fi
+          # og_resolve_ruleset: signals -> pack manifest (#354
+          # phase A resolver, per the rules survey). The
+          # security core is NEVER routed away; routing only
+          # adds packs or scopes path-bound ones; no signals
+          # at all = the full v2 set. A committed
+          # .github/opengrep-ruleset.txt adds packs (add-only,
+          # token-validated). Adapted from the reusable.
+          og_resolve_ruleset() {
+            local packs=() signals=0 p q
+            og_add() {
+              for q in "${packs[@]}"; do
+                [ "$q" = "$1" ] && return 0
+              done
+              packs+=("$1")
+            }
+            og_add p/security-audit
+            og_add p/owasp-top-ten
+            if [ -f package.json ]; then
+              signals=1; og_add p/typescript; og_add p/javascript
+            fi
+            if [ -f requirements.txt ] || [ -f pyproject.toml ] \
+              || [ -f setup.py ] || [ -f Pipfile ]; then
+              signals=1; og_add p/python
+            fi
+            if [ -f Cargo.toml ]; then
+              signals=1; og_add p/rust
+            fi
+            if [ -f go.mod ]; then
+              signals=1; og_add p/golang
+            fi
+            if [ -n "$(find . -maxdepth 3 -name '*.tf' \
+              -not -path './node_modules/*' -print -quit \
+              2>/dev/null)" ]; then
+              signals=1; og_add p/terraform
+            fi
+            if [ -f Dockerfile ] \
+              || [ -n "$(find . -maxdepth 2 -name 'Dockerfile*' \
+                -print -quit 2>/dev/null)" ]; then
+              signals=1; og_add p/dockerfile
+            fi
+            if compgen -G ".github/workflows/*.yml" >/dev/null \
+              || compgen -G ".github/workflows/*.yaml" >/dev/null; then
+              signals=1; og_add p/github-actions
+            fi
+            if [ "$signals" = "0" ]; then
+              og_add p/typescript; og_add p/javascript
+              og_add p/python; og_add p/rust; og_add p/golang
+              og_add p/terraform; og_add p/dockerfile
+              og_add p/github-actions
+            fi
+            if [ -f package.json ] \
+              && grep -Eq '"(jsonwebtoken|jose|passport-jwt)"' \
+                package.json; then
+              og_add p/jwt
+            fi
+            if [ "${OG_SCAN_MODE:-pr}" = "full" ] \
+              && grep -Eq 'torch|tensorflow' \
+                requirements.txt pyproject.toml 2>/dev/null; then
+              og_add p/trailofbits
+            fi
+            if [ -f .github/opengrep-ruleset.txt ]; then
+              while IFS= read -r p; do
+                case "$p" in
+                  p/[a-z0-9-]*) og_add "$p" ;;
+                esac
+              done < .github/opengrep-ruleset.txt
+            fi
+            printf '%s\n' "${packs[@]}" > "$OG_PACKS_FILE"
+            local manifest="" short
+            for p in "${packs[@]}"; do
+              short="${p#p/}"
+              manifest="${manifest:+$manifest,}$short"
+            done
+            printf '%s,custom-v2' "$manifest"
+          }
+          OG_PACKS_FILE=/tmp/og-packs.txt
+          if [ "$DEEP_INPUT" = "true" ]; then
+            OG_SCAN_MODE=full
+          else
+            OG_SCAN_MODE=pr
+          fi
+          export OG_SCAN_MODE
+          og_manifest=$(og_resolve_ruleset)
+          og_ruleset="${og_manifest},gate-ci"
+          printf '%s' "$og_ruleset" > /tmp/og-ruleset.txt
+          echo "opengrep ruleset (resolved): $og_ruleset"
+
+      # No set -e and `|| true` in the scan legs: a scanner or
+      # tool error degrades to "not scanned" (no SARIF, counts
+      # unset) — never a clean gate pass OR a finding. The
+      # aggregate step's completeness check enforces that.
+      - name: Opengrep gate scan (p/ci tier)
+        id: opengrep-gate
+        if: steps.activity.outputs.active != 'false'
+        run: |
+          set -uo pipefail
+          export PATH="$TOOLS_DIR/bin:$PATH"
+          date +%s > /tmp/og-start-epoch
+          if [ ! -x "$TOOLS_DIR/bin/opengrep" ]; then
+            echo "opengrep binary missing — gate leg skipped."
+            exit 0
+          fi
+          base_args=()
+          if [ -s /tmp/og-base.txt ]; then
+            base_args=(--baseline-commit \
+              "$(cat /tmp/og-base.txt)")
+          fi
+          bun_rule="package_managers.bun.bun-missing-minimum-release-age"
+          bun_rule="$bun_rule.bun-missing-minimum-release-age"
+          scan_excludes=(
+            --exclude node_modules --exclude .next
+            --exclude dist --exclude target --exclude build
+            --exclude out --exclude vendor --exclude .turbo
+            --exclude '*.min.js' --exclude '*.min.css'
+            --exclude package-lock.json --exclude yarn.lock
+            --exclude pnpm-lock.yaml --exclude '*.lock'
+            --exclude go.sum
+          )
+          timeout 240 opengrep scan --config p/ci \
+            "${base_args[@]}" "${scan_excludes[@]}" \
+            --exclude-rule "$bun_rule" \
+            --jobs 4 --sarif --disable-version-check \
+            . > /tmp/opengrep-gate.sarif \
+              2>/tmp/opengrep-gate.log \
+            || true
+
+      - name: Opengrep breadth scan (resolved ruleset)
+        id: opengrep-breadth
+        if: steps.activity.outputs.active != 'false'
+        run: |
+          set -uo pipefail
+          export PATH="$TOOLS_DIR/bin:$PATH"
+          if [ ! -x "$TOOLS_DIR/bin/opengrep" ]; then
+            echo "opengrep binary missing — breadth leg skipped."
+            exit 0
+          fi
+          base_args=()
+          if [ -s /tmp/og-base.txt ]; then
+            base_args=(--baseline-commit \
+              "$(cat /tmp/og-base.txt)")
+          fi
+          bun_rule="package_managers.bun.bun-missing-minimum-release-age"
+          bun_rule="$bun_rule.bun-missing-minimum-release-age"
+          scan_excludes=(
+            --exclude node_modules --exclude .next
+            --exclude dist --exclude target --exclude build
+            --exclude out --exclude vendor --exclude .turbo
+            --exclude '*.min.js' --exclude '*.min.css'
+            --exclude package-lock.json --exclude yarn.lock
+            --exclude pnpm-lock.yaml --exclude '*.lock'
+            --exclude go.sum
+          )
+          cfg_args=(--config /tmp/og-rules-v2.yml)
+          while IFS= read -r p; do
+            [ -n "$p" ] && cfg_args+=(--config "$p")
+          done < /tmp/og-packs.txt
+          timeout 420 opengrep scan "${cfg_args[@]}" \
+            "${base_args[@]}" "${scan_excludes[@]}" \
+            --exclude-rule "$bun_rule" \
+            --jobs 4 --sarif --disable-version-check \
+            . > /tmp/opengrep.sarif 2>/tmp/opengrep.log \
+            || true
+
+      - name: Zizmor workflow audit (report-only)
+        id: zizmor
+        if: steps.activity.outputs.active != 'false'
+        env:
+          SCAN_BASE: ${{ steps.scope.outputs.base }}
+          DEEP_INPUT: ${{ steps.scope.outputs.deep }}
+        run: |
+          set -uo pipefail
+          start=$SECONDS
+          echo "ran=false" >> "$GITHUB_OUTPUT"
+          if [ ! -d .github/workflows ]; then
+            echo "zizmor: no .github/workflows — skipping."
+            exit 0
+          fi
+          if [ "$DEEP_INPUT" != "true" ]; then
+            BASE="$SCAN_BASE"
+            changed=""
+            if [ -n "$BASE" ] && git cat-file -e "$BASE" 2>/dev/null; then
+              changed=$(git diff --name-only "$BASE" HEAD \
+                -- .github/workflows 2>/dev/null || true)
+            fi
+            if [ -z "$changed" ]; then
+              echo "zizmor: no workflow files in diff — skipping."
+              exit 0
+            fi
+          fi
+          if [ ! -x "$TOOLS_DIR/bin/zizmor" ]; then
+            echo "::warning::zizmor binary missing — leg skipped."
+            exit 0
+          fi
+          export PATH="$TOOLS_DIR/bin:$PATH"
+          zizmor --version
+          timeout 300 zizmor --format sarif --no-online-audits \
+            .github/workflows > /tmp/zizmor.sarif 2>/tmp/zizmor.log \
+            || true
+          if [ ! -s /tmp/zizmor.sarif ] \
+            || ! jq -e '.runs' /tmp/zizmor.sarif >/dev/null 2>&1; then
+            echo "::warning::zizmor produced no SARIF — leg skipped."
+            tail -5 /tmp/zizmor.log || true
+            exit 0
+          fi
+          # Suppress the self-repository audit class (round-3
+          # verdict: a path-style nitpick, pure noise). Filtered
+          # from the SARIF itself so counts AND annotations
+          # agree.
+          jq '.runs[]?.results |= map(
+            select(.ruleId != "zizmor/self-repository"))' \
+            /tmp/zizmor.sarif > /tmp/zizmor-filtered.sarif \
+            && mv /tmp/zizmor-filtered.sarif /tmp/zizmor.sarif
+          zm_total=$(jq '[.runs[]?.results[]?] | length' \
+            /tmp/zizmor.sarif)
+          {
+            echo "duration=$((SECONDS - start))"
+            echo "total=${zm_total:-0}"
+            echo "ran=true"
+          } >> "$GITHUB_OUTPUT"
+          echo "zizmor: total=${zm_total:-0} findings (report-only)"
+          jq -r '.runs[]?.results[]? |
+            "::warning file=\(.locations[0].physicalLocation
+              .artifactLocation.uri // "?")::zizmor: \(.ruleId)"' \
+            /tmp/zizmor.sarif | head -20 || true
+
+      - name: Opengrep aggregate (counts + annotations)
+        id: opengrep
+        if: steps.activity.outputs.active != 'false'
+        env:
+          DEEP_INPUT: ${{ steps.scope.outputs.deep }}
+        run: |
+          set -uo pipefail
+          echo "ran=false" >> "$GITHUB_OUTPUT"
+          echo "gated=0" >> "$GITHUB_OUTPUT"
+          og_start=$(cat /tmp/og-start-epoch 2>/dev/null \
+            || date +%s)
+          og_duration=$(( $(date +%s) - og_start ))
+          # Accept SARIF only from COMPLETE runs (Codex, #355):
+          # a failed ruleset load — or a timeout kill — can
+          # still leave parseable SARIF behind. Opengrep records
+          # invocations[].executionSuccessful per run; require
+          # at least one invocation and every one successful
+          # in BOTH tiers, else the whole leg counts as not-run
+          # (no gate verdict on partial data).
+          og_complete() {
+            [ -s "$1" ] && jq -e '[.runs[]?.invocations[]?
+              .executionSuccessful] | length > 0 and all' \
+              "$1" >/dev/null 2>&1
+          }
+          if ! og_complete /tmp/opengrep-gate.sarif \
+            || ! og_complete /tmp/opengrep.sarif; then
+            echo "::warning::opengrep produced no complete SARIF" \
+              "— SAST scan skipped (see log tails below)."
+            tail -3 /tmp/opengrep-gate.log || true
+            tail -3 /tmp/opengrep.log || true
+            exit 0
+          fi
+          # og_sarif_counts <sarif-file>: prints "<total>
+          # <error> <warning>" as TSV (RAW counts). SARIF
+          # results carry no level in opengrep output — the
+          # level comes from the rule's defaultConfiguration
+          # (SARIF default is warning). Extracted verbatim
+          # from the reusable.
+          og_sarif_counts() {
+            jq -r '
+              ([.runs[]?.tool.driver.rules[]?
+                | {(.id): (.defaultConfiguration.level
+                    // "warning")}] | add // {}) as $lv
+              | [.runs[]?.results[]?] as $r
+              | [($r | length),
+                 ([$r[] | select(
+                   ($lv[.ruleId] // .level // "warning")
+                   == "error")] | length),
+                 ([$r[] | select(
+                   ($lv[.ruleId] // .level // "warning")
+                   != "error")] | length)]
+              | @tsv' "$1"
+          }
+          # og_gated_errors <sarif-file> [report]: one TSV row
+          # per result — level, gated(0/1), path, line, ruleId.
+          # In gate mode, ERRORs gate after the carve-outs
+          # (#354 preconditions 2+3): detect-child-process,
+          # anything in .github/workflows/qodo-review.yml, and
+          # secrets-inherit in the deliberate thin-caller
+          # templates that call repo-review reusables. In
+          # report mode gated is always 0. Extracted verbatim
+          # from the reusable.
+          og_gated_errors() {
+            jq -r '
+              ([.runs[]?.tool.driver.rules[]?
+                | {(.id): (.defaultConfiguration.level
+                    // "warning")}] | add // {}) as $lv
+              | .runs[]?.results[]?
+              | [($lv[.ruleId] // .level // "warning"),
+                 .ruleId,
+                 (.locations[0].physicalLocation
+                   .artifactLocation.uri // "?"),
+                 ((.locations[0].physicalLocation
+                   .region.startLine // 1) | tostring)]
+              | @tsv' "$1" \
+            | while IFS="$(printf '\t')" read -r lvl rule path line; do
+                gated=0
+                if [ "$lvl" = "error" ] && [ "${2:-}" != "report" ]; then
+                  gated=1
+                  case "$rule" in
+                    *detect-child-process*) gated=0 ;;
+                    *secrets-inherit*)
+                      case "${path##*/}" in
+                        security-scan.yml|metrics-gate.yml|metrics-weekly.yml)
+                          if [ -f "$path" ] && grep -q \
+                            'webuildstuffio/repo-review/.github/workflows/' \
+                            "$path"; then
+                            gated=0
+                          fi
+                          ;;
+                      esac
+                      ;;
+                  esac
+                  if [ "$path" = \
+                    ".github/workflows/qodo-review.yml" ]; then
+                    gated=0
+                  fi
+                fi
+                printf '%s\t%s\t%s\t%s\t%s\n' \
+                  "$lvl" "$gated" "$path" "$line" "$rule"
+              done
+          }
+          read -r og_total og_error og_warning \
+            < <(og_sarif_counts /tmp/opengrep.sarif)
+          og_gated_errors /tmp/opengrep-gate.sarif \
+            > /tmp/opengrep-results.tsv
+          og_gated_errors /tmp/opengrep.sarif report \
+            >> /tmp/opengrep-results.tsv
+          og_gated=$(awk -F '\t' '$2 == 1' \
+            /tmp/opengrep-results.tsv | wc -l)
+          {
+            echo "duration=$og_duration"
+            echo "total=${og_total:-0}"
+            echo "error=${og_error:-0}"
+            echo "warning=${og_warning:-0}"
+            echo "gated=$og_gated"
+            echo "ran=true"
+          } >> "$GITHUB_OUTPUT"
+          echo "opengrep: total=${og_total:-0}" \
+            "error=${og_error:-0} warning=${og_warning:-0}" \
+            "gated_errors=$og_gated"
+          # Annotations: gated ERRORs are ::error:: on PRs
+          # (the gate); everything else is ::warning::.
+          while IFS="$(printf '\t')" \
+            read -r lvl gated path line rule; do
+            if [ "$gated" = "1" ] \
+              && [ "$DEEP_INPUT" != "true" ]; then
+              echo "::error file=$path,line=$line::" \
+                "opengrep (p/ci gate): $rule"
+            elif [ "$lvl" = "error" ]; then
+              echo "::warning file=$path,line=$line::" \
+                "opengrep: $rule"
+            fi
+          done < /tmp/opengrep-results.tsv
+          {
+            echo "## Opengrep SAST (vendored, #354)"
+            echo "ruleset: $(cat /tmp/og-ruleset.txt 2>/dev/null \
+              || echo unknown)"
+            echo "breadth: total=${og_total:-0}" \
+              "error=${og_error:-0} warning=${og_warning:-0}"
+            echo "gate (p/ci): gated_errors=$og_gated"
+            echo "duration: ${og_duration}s"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail on Opengrep gated errors (p/ci gate tier)
+        if: >-
+          github.event_name == 'pull_request' &&
+          steps.opengrep.outputs.ran == 'true' &&
+          steps.opengrep.outputs.gated > 0
+        run: |
+          echo "❌ opengrep gate tier (p/ci):" \
+            "${{ steps.opengrep.outputs.gated }} gated" \
+            "ERROR finding(s) in this diff:"
+          awk -F '\t' '$2 == 1 {printf "  %s:%s %s\n", $3, $4, $5}' \
+            /tmp/opengrep-results.tsv
+          exit 1
