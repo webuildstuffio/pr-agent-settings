@@ -1,0 +1,37 @@
+---
+# webuildstuffio org standard — GitHub Actions only variant
+# For repos with no package manager manifests (e.g. pure shell repos)
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+      day: "monday"
+      time: "05:00"
+    # Fleet standard (2026-10-21 Opengrep experiment rounds 1+2):
+    # let a new action version bake 5 days before Dependabot
+    # proposes it.
+    cooldown:
+      default-days: 5
+    rebase-strategy: "auto"
+    open-pull-requests-limit: 10
+    groups:
+      actions-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+        patterns:
+          - "*"
+      actions-major:
+        update-types:
+          - "major"
+        patterns:
+          - "*"
+    labels:
+      - "dependencies"
+      - "github-actions"
+      - "monthly-update"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
