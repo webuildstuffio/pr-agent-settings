@@ -6,9 +6,9 @@ Org-wide AI code-review configuration for the webuildstuffio GitHub org. This re
 
 - **Qodo pr-agent** `v0.46.0` (Docker action) — inline code suggestions on PRs
 - **claude-code-action** `v1.0.233` — powers the `@claude` task automation in issues/PRs
-- **GitHub Actions** on `ubicloud-standard-2` runners (label declared in `.github/actionlint.yaml`, required for actionlint to pass)
+- **GitHub Actions** on `ubicloud-standard-2` runners (Ubicloud label, set via `runs-on:` in the workflows)
 - Supporting actions: `actions/checkout@v4`, `actions/cache@v4`, `actions/github-script@v7`
-- No package manager, no build, no test suite. Validation = actionlint + review.
+- No package manager, no build, no test suite. Validation = review (yamllint for workflow YAML).
 
 ## Architecture
 
