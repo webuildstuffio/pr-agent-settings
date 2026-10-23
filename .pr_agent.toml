@@ -4,12 +4,16 @@
 # Docs: https://qodo-merge-docs.qodo.ai/usage-guide/configuration_options/#global-configuration-file
 
 [config]
-# Model: gemma-4-31b-it:free primary + trimmed 3-model :free fallback chain.
-# Trimmed 2026-10-17 (owner: 3 proven free models only, retries 1,
-# ai_timeout 90s per call). openrouter/free as PRIMARY verified
-# silent-broken 2026-10-09 — last-resort fallback only, never primary.
-model = "openrouter/google/gemma-4-31b-it:free"
-fallback_models = ["openrouter/nvidia/nemotron-3-ultra-550b-a55b:free", "openrouter/google/gemma-4-26b-a4b-it:free", "openrouter/free"]
+# Model: nemotron-3-ultra-550b:free primary + trimmed 3-model :free
+# fallback chain. Final chain 2026-10-23 (owner): Nemotron Ultra
+# primary (proven serving real reviews); fallbacks gemma-4-31b-it,
+# gemma-4-26b-a4b-it, openrouter/free. retries 1, ai_timeout 90s
+# per call. openrouter/free as PRIMARY verified silent-broken
+# 2026-10-09 — last-resort fallback only, never primary.
+# Keep in sync with qodo-review.yml (AGENTS.md known trap: model
+# config lives in both places; env wins).
+model = "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"
+fallback_models = ["openrouter/google/gemma-4-31b-it:free", "openrouter/google/gemma-4-26b-a4b-it:free", "openrouter/free"]
 num_retries = 1
 ai_timeout = 90
 custom_model_max_tokens = 131072

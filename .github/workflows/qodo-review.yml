@@ -1,23 +1,26 @@
-# Qodo AI Code Suggestions v3.3.1
+# Qodo AI Code Suggestions v3.3
 # Inline code suggestions only — the highest-value, lowest-noise output.
 # All config lives in webuildstuffio/pr-agent-settings/.pr_agent.toml (global)
-# and per-repo .pr_agent.toml (overrides). This workflow is intentionally
-# minimal.
+# and per-repo .pr_agent.toml (overrides). This workflow is intentionally minimal.
 #
-# Model: gemma-4-31b-it:free primary + trimmed 3-model :free fallback chain.
-# Trimmed 2026-10-17 (owner: 3 proven free models only, retries 1,
-# ai_timeout 90s per call). openrouter/free last resort only.
-# API: direct OpenRouter (no AI Gateway proxy — CF gateway corrupts
-# streaming).
+# Model: repo-variable driven - QODO_MODEL + QODO_FALLBACK_1..3.
+# Fleet rollout 2026-10-23: Nemotron 3 Ultra 550B (free) primary;
+# fallbacks gemma-4-31b-it, gemma-4-26b-a4b-it, openrouter/free
+# (last resort). The value after || is the built-in default used
+# when the variable is unset; it matches the QODO_* repo variables.
+# retries 1, ai_timeout 90s per call.
+# API: direct OpenRouter (no AI Gateway proxy — CF gateway corrupts streaming).
+# DO NOT use openrouter/free as primary — proven broken (silent no-reviews).
 # NOTE: webuildstuffio/pr-agent-settings MUST stay PUBLIC — the default
 # GITHUB_TOKEN cannot read it as a private repo (404), which silently drops
 # all global tuning (temperature, score threshold, focus instructions).
 # /review and /describe available via manual /command in PR comments.
 #
 # CHANGELOG:
-# v3.3.1: (Sep 30 2026) Scope concurrency group by event name — a
-#          comment-triggered run (skips in ~1s) must never cancel an
-#          in-progress pull_request run.
+# v3.3.1: (Sep 30 2026) Fix: issue_comment events cancelled in-progress PR reviews
+#          via shared concurrency group. Root cause: GH Actions evaluates concurrency
+#          BEFORE job-level 'if:', so any bot comment entering the same group killed
+#          the running /improve job. Fix: include event_name in group key.
 # v3.3.0: (Sep 30 2026) Concurrency groups, improved caching, permission polish.
 # v3.2.1: (Sep 29 2026) Bypass CF AI Gateway — route directly to OpenRouter.
 # v3.2.0: (Sep 29 2026) gemma-4-31b primary + 8-model :free fallback chain.
@@ -37,18 +40,7 @@ name: Qodo AI Code Suggestions
         type: string
 
 concurrency:
-  # Group includes the event type. The workflow also fires on issue_comment (for
-  # manual /improve), and EVERY comment on a PR (CI bot reports, review
-  # threads) shares group qodo-<PR#> with the in-progress pull_request
-  # suggestions run — without the event name, cancel-in-progress kills Qodo
-  # mid-run and the comment-run then skips in ~1s. Seen 2026-09-29/30:
-  # shell-config#499, folio-app#2596/#2597. Same-event-type dedup is
-  # preserved: reopen cancels a stale open-run, a newer /improve supersedes
-  # an older one.
-  group: >-
-    qodo-${{ github.event_name }}-${{
-      github.event.pull_request.number || github.event.issue.number ||
-      github.run_id }}
+  group: qodo-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
@@ -85,12 +77,8 @@ jobs:
         uses: actions/cache@v6
         with:
           path: /var/lib/docker
-          # Key carries the pr-agent version: with a bare constant key
-          # the first-saved Docker store would be served forever while
-          # the action pin below moves on. Bump the suffix whenever the
-          # qodo-ai/pr-agent pin changes. (Fleet cache audit 2026-10-14)
-          key: qodo-docker-${{ runner.os }}-pragent-0.46.0
-          restore-keys: qodo-docker-${{ runner.os }}-
+          key: qodo-docker-${{ runner.os }}
+          restore-keys: qodo-docker-
 
       - name: Set PR for manual runs
         if: github.event_name == 'workflow_dispatch'
@@ -109,16 +97,52 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Validate Qodo model variables
+        env:
+          QODO_MODEL: >-
+            ${{ vars.QODO_MODEL ||
+            'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free' }}
+          QODO_FALLBACK_1: >-
+            ${{ vars.QODO_FALLBACK_1 ||
+            'openrouter/google/gemma-4-31b-it:free' }}
+          QODO_FALLBACK_2: >-
+            ${{ vars.QODO_FALLBACK_2 ||
+            'openrouter/google/gemma-4-26b-a4b-it:free' }}
+          QODO_FALLBACK_3: "${{ vars.QODO_FALLBACK_3 || 'openrouter/free' }}"
+        run: |
+          fail=0
+          check_var() {
+            name="$1"; value="$2"
+            case "$value" in
+              openrouter/*) ;;
+              *)
+                echo "::error::$name must start with openrouter/ (got: $value)"
+                fail=1 ;;
+            esac
+            case "$value" in
+              *[\"\,\[\]]* | *\\* | *[[:space:]]*)
+                echo "::error::$name has forbidden characters (got: $value)"
+                fail=1 ;;
+            esac
+          }
+          check_var QODO_MODEL "$QODO_MODEL"
+          check_var QODO_FALLBACK_1 "$QODO_FALLBACK_1"
+          check_var QODO_FALLBACK_2 "$QODO_FALLBACK_2"
+          check_var QODO_FALLBACK_3 "$QODO_FALLBACK_3"
+          exit "$fail"
+
       - name: Run Qodo /improve
-        uses: qodo-ai/pr-agent@v0.48.0
+        uses: qodo-ai/pr-agent@981344be2755e303df501e18e3f60b848a188a80 # v0.48.0
         env:
           OPENROUTER__KEY: ${{ secrets.QODO_OPENROUTER_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          config.model: "openrouter/google/gemma-4-31b-it:free"
+          config.model: >-
+            ${{ vars.QODO_MODEL ||
+            'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free' }}
           config.fallback_models: >-
-            ["openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
-            "openrouter/google/gemma-4-26b-a4b-it:free",
-            "openrouter/free"]
+            ["${{ vars.QODO_FALLBACK_1 || 'openrouter/google/gemma-4-31b-it:free' }}",
+            "${{ vars.QODO_FALLBACK_2 || 'openrouter/google/gemma-4-26b-a4b-it:free' }}",
+            "${{ vars.QODO_FALLBACK_3 || 'openrouter/free' }}"]
           config.num_retries: "1"
           config.ai_timeout: "90"
           CONFIG__CUSTOM_MODEL_MAX_TOKENS: "131072"
