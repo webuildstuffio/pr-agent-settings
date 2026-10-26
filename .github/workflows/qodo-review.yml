@@ -22,7 +22,10 @@
 #          #430) instead of inheriting the rolling action wrapper; version
 #          the Docker cache key; raise config.ai_timeout 90 -> 180 and set
 #          config.retry_same_model_on_timeout=false so a slow Nemotron
-#          call fails over to the Gemma fallbacks instead of retrying it.
+#          call fails over to the Gemma fallbacks instead of retrying it;
+#          job timeout-minutes 8 -> 15: one run makes several tool
+#          calls, each with its own fallback chain, and at 180s a call
+#          the old cap could kill the job mid-run on a slow day.
 # v3.3.1: (Sep 30 2026) Fix: issue_comment events cancelled in-progress PR reviews
 #          via shared concurrency group. Root cause: GH Actions evaluates concurrency
 #          BEFORE job-level 'if:', so any bot comment entering the same group killed
@@ -71,7 +74,11 @@ jobs:
         )
       }}
     runs-on: ubicloud-standard-2
-    timeout-minutes: 8
+    # 15, not 8 (v3.5): a run makes several pr-agent tool calls, each
+    # with its own fallback chain at ai_timeout 180s; the old cap could
+    # kill the job mid-run on a slow day. The cap only binds in that
+    # pathological case - typical runs are ~2-4min.
+    timeout-minutes: 15
     continue-on-error: true
     permissions:
       issues: write
