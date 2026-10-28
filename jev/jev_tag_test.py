@@ -88,8 +88,34 @@ def self_test():
     sec_bundle = dict(bundle, pr_labels=["type:security"])
     d2 = decide(sec_bundle, plain, None)
     check("human security floor", d2["security_band"] == "high"
-          and d2["codex_post"] is True
+          and d2["codex_post"] is False
           and d2["human_security_label"] is True)
+    soft = layer1({"files": [{"path": "src/page.tsx", "additions": 3,
+                              "deletions": 1}],
+                   "pr_title": "fix seo meta", "issue": None,
+                   "pr_body": "uses the token count from the design"})
+    check("layer1 soft keyword", soft["any"] and not soft["hard"])
+    check("layer1 path hard", layer1(b)["hard"])
+    low = {"answers": {
+        "security_related": {"type": "noul", "noul": 0.19},
+        "blast_radius": {"type": "score", "score": 2.0},
+        "change_type": {"type": "choice", "choice": "bug",
+                        "probabilities": {"bug": 0.8}},
+        "priority": {"type": "choice", "choice": "P3",
+                     "probabilities": {"P3": 0.6}}}}
+    d4 = decide(bundle, soft, low)
+    check("soft hit mid band no post", d4["security_band"] == "mid"
+          and d4["codex_post"] is False
+          and "security" in d4["types"])
+    low4 = {"answers": dict(low["answers"],
+                            blast_radius={"type": "score",
+                                          "score": 3.4})}
+    d5 = decide(bundle, soft, low4)
+    check("soft hit blast4 posts", d5["security_band"] == "mid"
+          and d5["codex_post"] is True)
+    d6 = decide(bundle, layer1(b), None)
+    check("path hit posts without jev", d6["security_band"] == "high"
+          and d6["codex_post"] is True)
     prior_self = {"pr_applied": ["type:security"], "issue_applied": [],
                   "issue_number": None}
     d3 = decide(sec_bundle, plain, None, prior=prior_self)

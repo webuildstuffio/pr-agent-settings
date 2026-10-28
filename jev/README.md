@@ -13,7 +13,11 @@ the end of the `qodo-review.yml` `suggest` job in pilot repos and:
    effort, owner labels, plus record-only Codex-worth and low-risk
    signals).
 4. Adds schema-v4.2 labels to the PR and its linked issue, and posts
-   `@codex security review` once when the security band fires.
+   `@codex security review` once when the post rule fires: a hard
+   Layer 1 hit (a rule-matched path or a critical keyword), a high
+   Jev security probability, or a mid-band change with blast
+   radius 4+. Soft keyword hits alone label type:security without
+   posting.
 
 Guardrails: Jev can only upgrade security, never downgrade a Layer 1
 hit or a human label; the step never removes labels; labels a human
