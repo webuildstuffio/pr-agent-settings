@@ -25,8 +25,8 @@ import urllib.error
 import urllib.request
 
 from jev_lib import (ESCALATION_COMMENT, GENERIC_LABELS, TIERS,
-                     JevError, build_questions, build_state, call_jev,
-                     decide, layer1, plan_labels)
+                     VERSION, JevError, build_questions, build_state,
+                     call_jev, decide, layer1, plan_labels)
 
 GH_API = "https://api.github.com"
 MARKER_RE = re.compile(r"<!-- jev-tag:v1 (\{.*?\}) -->", re.DOTALL)
@@ -124,6 +124,11 @@ def fetch_bundle(gh, repo, pr_number, workdir):
         "agents": "",
     }
     issue_no = parse_linked_issue(bundle["pr_body"])
+    if not issue_no:
+        # Fleet convention also puts the Refs reference in the title
+        # (repo-review #488 carried it only there and its linked
+        # issue silently got no labels).
+        issue_no = parse_linked_issue(bundle["pr_title"])
     if issue_no and issue_no != pr_number:
         issue = gh.call("GET", f"/repos/{repo}/issues/{issue_no}",
                         ok_missing=True)
@@ -265,6 +270,7 @@ def marker_body(state, d, adds_pr, adds_issue, codex_now,
             shown.append(f"+{len(notes) - 4} more")
         lines.append("<sub>Skipped/notes: " + "; ".join(shown)
                      + "</sub>")
+    lines.append(f"<sub>jev-tag v{VERSION}</sub>")
     payload = json.dumps(state, separators=(",", ":"), sort_keys=True)
     return f"<!-- jev-tag:v1 {payload} -->\n" + "\n".join(lines)
 

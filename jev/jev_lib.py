@@ -34,6 +34,13 @@ SEC_HIGH = 0.80               # P(security) high band
 SEC_MID = 0.40                # P(security) mid band
 STATE_BUDGET = 27000          # bytes; Jev long-context mode starts ~32k
 
+# Step version (NOT the marker state schema, which stays jev-tag:v1).
+# v2.0.0 = the combined 2026-10-28 release: the label-guard/specialty/
+# new-questions iteration plus the warrant gate and the paths-only
+# Layer 1 (keyword evidence deleted). Decision behavior changed
+# materially, so runs across this boundary are not comparable.
+VERSION = "2.0.0"
+
 # Fleet label schema v4.2 generic set (53). Anything in a repo's live
 # label list NOT in this set counts as a repo specialty label.
 GENERIC_LABELS = set(
@@ -93,80 +100,134 @@ def trunc_bytes(text, limit):
 
 # ------------------------------------------------------------- Layer 1
 
-# (regex on path, category, critical)
-PATH_RULES = [
-    (r"(^|[/._-])(auth|oauth|login|sessions?|tokens?|passwords?|"
-     r"credentials?|permissions?|rbac|access[-_]?control|access|"
-     r"authorization)(/|\.|-|_|$)", "auth", False),
-    (r"(^|/)(crypto|encrypt|decrypt|signing|secrets?|keys?)(/|\.|-|_|$)"
-     r"|\.(pem|key|p12|pfx)$", "secrets", False),
-    (r"(^|/)(payments?|billing|checkout|stripe|invoices?|subscriptions?)"
-     r"(/|\.|-|_|$)", "payments", False),
-    (r"webhooks?", "infra-CI", False),
-    (r"(^|/)(uploads?|multipart)(/|\.|-|_|$)|\.github/workflows/",
-     "infra-CI", False),
-    (r"(^|/)migrations?/|\.sql$|(^|/)schema\.sql$|(^|/)d1(/|$)",
-     "data-PII", False),
-    (r"(^|/)(wrangler\.(toml|jsonc?)|terraform|infra)|\.tf$|Dockerfile|"
-     r"docker-compose", "infra-CI", False),
-    (r"(^|/)(users?|accounts?|pii|personal[-_]?data|gdpr)(/|\.|-|_|$)",
-     "data-PII", False),
+# Layer 1 matches on PATH SEMANTICS only: a directory component or
+# a filename-stem word (stems split on - and _) must EQUAL a category
+# word. Filename substrings never match. There is deliberately NO
+# text/keyword scan of titles or bodies: Jev reads the text itself,
+# and word matching misfired in production (the word "token" in
+# design-token prose applied type:security to repo-review #488).
+# The one exception to whole-word matching is the exact sensitive-
+# filename allowlist below (.env*, key material, credential files);
+# hits there are "critical".
+COMPONENT_WORDS = [
+    ("auth", {"auth", "authentication", "oauth", "oauth2", "login",
+              "logout", "signin", "signup", "session", "sessions",
+              "password", "passwords", "permission", "permissions",
+              "rbac", "authorization", "access", "credential",
+              "credentials"}),
+    ("secrets", {"crypto", "encrypt", "encryption", "decrypt",
+                 "decryption", "signing", "secret", "secrets", "key",
+                 "keys", "keystore"}),
+    ("payments", {"payment", "payments", "billing", "checkout",
+                  "stripe", "invoice", "invoices", "subscription",
+                  "subscriptions"}),
+    ("data-PII", {"user", "users", "account", "accounts", "pii",
+                  "personal", "gdpr", "migration", "migrations",
+                  "d1"}),
 ]
+WEBHOOK_WORDS = {"webhook", "webhooks"}
+UPLOAD_WORDS = {"upload", "uploads", "multipart"}
+INFRA_DIRS = {"terraform", "infra", "infrastructure"}
+INFRA_BASENAMES = {"wrangler.toml", "wrangler.json", "wrangler.jsonc",
+                   "cloudflare.config.ts"}
+SENSITIVE_STEMS = {"credentials", "credential"}
+SENSITIVE_BASENAMES = {"id_rsa", "id_ed25519", "id_dsa", "id_ecdsa"}
+SENSITIVE_EXTS = {".pem", ".key", ".p12", ".pfx"}
 DEP_MANIFESTS = {
     "package.json", "bun.lock", "bun.lockb", "cargo.toml", "cargo.lock",
     "go.mod", "go.sum", "requirements.txt", "pyproject.toml", "pipfile",
     "gemfile", "gemfile.lock", "composer.json", "composer.lock",
     "pom.xml", "build.gradle", "yarn.lock", "pnpm-lock.yaml",
-    "package-lock.json",
+    "package-lock.json", "uv.lock",
 }
-# (regex on text, category, critical)
-KEYWORD_RULES = [
-    (r"CVE-\d{4}-\d{4,}", "secrets", True),
-    (r"\b(remote code execution|auth(?:entication)? bypass|privilege "
-     r"escalation|sql injection|cross-site scripting|\bxss\b|"
-     r"vulnerabilit\w+|exploit\w*|leaked (secret|credential|key|token)|"
-     r"credential leak|secret leak)\b", "secrets", True),
-    (r"\b(prod(uction)? (is )?down|site (is )?down|outage)\b",
-     "infra-CI", True),
-    (r"\b(security|auth|permission|token|secret|password|encrypt\w*|"
-     r"session|oauth)\b", "auth", False),
-]
+
+
+def _path_categories(path):
+    """(categories, critical) for one changed path, by directory
+    semantics: whole directory components and whole filename-stem
+    words only. Design-token files (styling values) get no
+    stem-word matches, so token semantics can never create
+    evidence on their own; directory words and the exact
+    basename/extension rules still apply to them."""
+    comps = [c for c in path.lower().split("/") if c]
+    if not comps:
+        return set(), False
+    base = comps[-1]
+    stem = base.rsplit(".", 1)[0] if "." in base else base
+    ext = "." + base.rsplit(".", 1)[1] if "." in base else ""
+    design_token = (stem == "tokens"
+                    or stem.endswith(("-tokens", "_tokens",
+                                      ".tokens"))
+                    or "design-token" in stem
+                    or "design-tokens" in comps
+                    or "design_tokens" in comps)
+    words = set()
+    for comp in comps[:-1]:
+        words.add(comp)
+        words.update(re.split(r"[-_]", comp))
+    if not design_token:
+        words.update(re.split(r"[-_]", stem))
+    cats = set()
+    crit = False
+    if comps[:2] == [".github", "workflows"]:
+        cats.add("infra-CI")
+    if base in DEP_MANIFESTS:
+        cats.add("dependencies")
+    if (base == ".env" or base.startswith(".env.")
+            or ext in SENSITIVE_EXTS
+            or base in SENSITIVE_BASENAMES
+            or stem in SENSITIVE_STEMS):
+        cats.add("secrets")
+        crit = True
+    for cat, vocab in COMPONENT_WORDS:
+        if words & vocab:
+            cats.add(cat)
+    if words & WEBHOOK_WORDS or words & UPLOAD_WORDS:
+        cats.add("infra-CI")
+    if ext == ".sql":
+        cats.add("data-PII")
+    if (any(c in INFRA_DIRS for c in comps[:-1])
+            or base in INFRA_BASENAMES or ext in (".tf", ".tfvars")
+            or base == "dockerfile" or base.startswith("dockerfile.")
+            or base == "docker-compose"
+            or base.startswith("docker-compose.")):
+        cats.add("infra-CI")
+    return cats, crit
 
 
 def layer1(bundle):
-    """Deterministic security rules. Any hit = security, final."""
+    """Deterministic PATH evidence: per-category matched file lists.
+    Every hit is a "hard" hit (paths only; there is no text scan),
+    so any hit bands security high and warrants the security type
+    on its own. `critical` marks the sensitive-filename allowlist
+    (.env*, key material, credential files)."""
     hits = []
+    evidence = {}
+    critical = False
     for f in bundle["files"]:
         path = f["path"]
-        base = path.rsplit("/", 1)[-1].lower()
-        if base in DEP_MANIFESTS:
+        cats, crit = _path_categories(path)
+        critical = critical or crit
+        for cat in sorted(cats):
             hits.append({"kind": "path", "match": path,
-                         "category": "dependencies", "critical": False})
-        for pattern, category, critical in PATH_RULES:
-            if re.search(pattern, path, re.IGNORECASE):
-                hits.append({"kind": "path", "match": path,
-                             "category": category, "critical": critical})
-    text = "\n".join([bundle["pr_title"], bundle["pr_body"], (bundle["issue"] or {}).get("title", ""), (bundle["issue"] or {}).get("body", "")])
-    for pattern, category, critical in KEYWORD_RULES:
-        for m in re.finditer(pattern, text, re.IGNORECASE):
-            hits.append({"kind": "keyword", "match": m.group(0)[:60],
-                         "category": category, "critical": critical})
+                         "category": cat, "critical": crit})
+            evidence.setdefault(cat, []).append(path)
     seen, uniq = set(), []
     for h in hits:
-        key = (h["kind"], h["match"], h["category"])
+        key = (h["match"], h["category"])
         if key not in seen:
             seen.add(key)
             uniq.append(h)
     return {
         "hits": uniq[:40],
+        "evidence": {cat: paths[:10]
+                     for cat, paths in sorted(evidence.items())},
         "any": len(uniq) > 0,
-        "critical": any(h["critical"] for h in uniq),
-        # A "hard" hit: any path hit, or a critical keyword hit. Soft
-        # keyword hits alone (e.g. the word "token" in prose) still
-        # count as security for labels, but never trigger a Codex
-        # security review post on their own.
-        "hard": any(h["kind"] == "path" or h["critical"] for h in uniq),
-        "categories": sorted({h["category"] for h in uniq}),
+        "critical": critical,
+        # Kept for decide() and the record format: every Layer 1
+        # hit is a path hit, so hard == any.
+        "hard": len(uniq) > 0,
+        "categories": sorted(evidence),
     }
 
 
@@ -328,13 +389,20 @@ def build_state(bundle, l1):
     if bundle.get("files_truncated"):
         files_text += "\n(note: file list hit the API cap; may be incomplete)"
     parts.append("Changed files:\n" + trunc_bytes(files_text, 6000))
-    if l1["hits"]:
-        desc = "; ".join(
-            f"{h['kind']}:{h['match']} [{h['category']}]"
-            for h in l1["hits"][:15])
-        parts.append("Deterministic rule hits: " + desc)
+    evidence = l1.get("evidence") or {}
+    if evidence:
+        lines = [f"- {cat}: {', '.join(paths)}"
+                 for cat, paths in sorted(evidence.items())]
+        parts.append(
+            "Deterministic evidence (facts only: these changed-file "
+            "paths matched security-relevant path categories; they "
+            "are not conclusions, whether the change is actually "
+            "security-related is for the questions to judge):\n"
+            + "\n".join(lines))
     else:
-        parts.append("Deterministic rule hits: none")
+        parts.append(
+            "Deterministic evidence: no changed file matched a "
+            "security-relevant path category.")
     if bundle["readme"]:
         parts.append("Repository README excerpt:\n" + trunc_bytes(bundle["readme"], 2500))
     if bundle["agents"]:
@@ -495,13 +563,10 @@ def decide(bundle, l1, jev, prior=None):
     d["p_secrets_in_text"] = secrets_txt
     l1_hard = bool(l1.get("hard"))
     d["layer1_hard"] = l1_hard
-    if l1_hard or human_sec:
+    if l1_hard or human_sec or (p_sec is not None and p_sec >= SEC_HIGH):
         band = "high"
-    elif p_sec is not None and p_sec >= SEC_HIGH:
-        band = "high"
-    elif l1["any"] or (p_sec is not None and p_sec >= SEC_MID):
-        band = "mid"
-    elif secrets_txt is not None and secrets_txt >= SEC_HIGH:
+    elif ((p_sec is not None and p_sec >= SEC_MID)
+          or (secrets_txt is not None and secrets_txt >= SEC_HIGH)):
         band = "mid"
     elif p_sec is not None:
         band = "low"
@@ -510,13 +575,29 @@ def decide(bundle, l1, jev, prior=None):
     d["security_band"] = band
     cat, _ = top_choice(answers.get("security_category"))
     d["security_category"] = cat if cat in SEC_CATEGORIES else None
-    # The Codex post fires on a HARD Layer 1 hit or a high Jev
+    # The security TYPE needs its own warrant, stricter than the
+    # band. It comes from exactly two sources: (a) a Layer 1 hard
+    # PATH hit (or the human-label floor), or (b) Jev's own verdict
+    # with category agreement: a mid-band-or-higher probability
+    # whose own security_category answer is a real category, not
+    # "none". A bare mid-band probability with category "none"
+    # (folio-app #3109) applied type:security to a non-security PR
+    # in apply mode, and the type then cascaded into the flagship
+    # priority floor. Jev's secrets_in_text at high is a direct
+    # detection of pasted secret material and also warrants.
+    cat_agrees = cat in SEC_CATEGORIES and cat != "none"
+    sec_type_warranted = (
+        l1_hard or human_sec
+        or (secrets_txt is not None and secrets_txt >= SEC_HIGH)
+        or (p_sec is not None and p_sec >= SEC_MID and cat_agrees))
+    d["security_type_warranted"] = bool(sec_type_warranted)
+    # The Codex post fires on a HARD Layer 1 path hit or a high Jev
     # probability (the spec's post rule), or on the spec's mid-band
     # blast upgrade: Jev probability in the mid range with blast
-    # radius >= 4, whatever else set the band. Soft keyword hits
-    # and the human-label floor raise the band for labels, but do
-    # not post on their own, and the floor must never suppress an
-    # escalation Jev's own signals earned.
+    # radius >= 4, whatever else set the band. The human-label
+    # floor raises the band for labels, but does not post on its
+    # own, and the floor must never suppress an escalation Jev's
+    # own signals earned.
     codex_post = (
         l1_hard
         or (p_sec is not None and p_sec >= SEC_HIGH)
@@ -536,7 +617,13 @@ def decide(bundle, l1, jev, prior=None):
         if (name in SCHEMA_TYPES and name not in types
                 and p >= TYPE_SECOND_MIN and len(types) < 3):
             types.append(name)
-    if band in ("high", "mid") and "security" not in types:
+    # A change_type pick can also place "security" in types
+    # directly; the warrant governs that path too, or it bypasses
+    # the check.
+    if "security" in types and not sec_type_warranted:
+        types = [t for t in types if t != "security"]
+    if (band in ("high", "mid") and sec_type_warranted
+            and "security" not in types):
         if len(types) < 3:
             types.append("security")
         elif types:

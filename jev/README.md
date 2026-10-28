@@ -2,22 +2,32 @@
 
 `jev_tag.py` is the fleet's Jev decision-model tagging step (decision
 logic in `jev_lib.py`, imported by it; offline checks in
-`jev_tag_test.py`). It runs at
-the end of the `qodo-review.yml` `suggest` job in pilot repos and:
+`jev_tag_test.py`). It runs first in the `qodo-review.yml` `suggest`
+job in wired repos (Jev-first standard, 2026-10-28), so its labels,
+security trigger, and sticky comment land before the pr-agent run:
 
 1. Gathers PR state (PR text, changed files, linked issue, repo tier
    from the `rr-tier` property, README + AGENTS.md excerpts).
-2. Runs deterministic Layer 1 security rules over paths and text.
+2. Runs deterministic Layer 1 path rules: directory semantics over
+   changed paths (auth, secrets, payments, data-PII, infra,
+   dependency manifests, sensitive filenames such as `.env*`,
+   `*.pem`, `*.key`, `credentials*`), yielding per-category evidence
+   lists. There is no text or keyword scan; Jev reads the text
+   itself.
 3. Asks Jev (`typesafe/jev-1.14`, OpenRouter Decisions API) one request
    with the full label job sheet (security, type, priority, themes,
    effort, owner labels, plus record-only Codex-worth and low-risk
-   signals).
+   signals), with the Layer 1 evidence shown as facts, not
+   conclusions.
 4. Adds schema-v4.2 labels to the PR and its linked issue, and posts
    `@codex security review` once when the post rule fires: a hard
-   Layer 1 hit (a rule-matched path or a critical keyword), a high
-   Jev security probability, or a mid-range Jev probability with blast
-   radius 4+. Soft keyword hits alone label type:security without
-   posting.
+   Layer 1 path hit, a high Jev security probability, or a mid-range
+   Jev probability with blast radius 4+. The type:security label
+   additionally requires a warrant: a hard path hit, or Jev's own
+   verdict with category agreement (its category answer is not
+   "none") at mid band or higher, or a high-confidence
+   secrets-in-text detection. A bare mid-band probability with
+   category "none" bands the PR without applying the security type.
 
 Guardrails: Jev can only upgrade security, never downgrade a Layer 1
 hit or a human label; the step never removes labels; labels a human
@@ -44,9 +54,13 @@ python3 /tmp/jev_tag.py --repo "$GITHUB_REPOSITORY" --pr "$PR" \
 
 ## Updating
 
-Edit the script here, merge, then bump the pinned SHA in each pilot
-repo's `qodo-review.yml` (`repo-review`, `folio-app`, `powerloss.tech`,
-`megamem`, `shell-config`) to the new main commit. Mode is controlled
-per repo by the `JEV_TAG_MODE` repository variable (`dry-run` or
-`apply`; default `apply` when unset). Python 3 standard library only.
+Edit the script here, merge, then bump the pinned SHA in each wired
+repo's `qodo-review.yml` to the new main commit. The step carries a
+version (`VERSION` in `jev_lib.py`, currently v2.0.0; the v1 to v2
+jump marks the warrant gate plus the paths-only Layer 1, whose
+decisions are not comparable to v1 runs). Wirings stamp the version
+as a `# jev-tag v2.0.0` comment above the step and the sticky comment
+footer shows it. Mode is controlled per repo by the `JEV_TAG_MODE`
+repository variable (`dry-run` or `apply`; default `apply` when
+unset). Python 3 standard library only.
 Self-test: `python3 jev/jev_tag_test.py`.

@@ -10,9 +10,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from jev_lib import (STATE_BUDGET, build_questions, build_state,
-                     clamp_priority, decide, layer1, plan_labels,
-                     repo_specialties)
+from jev_lib import (STATE_BUDGET, VERSION, build_questions,
+                     build_state, clamp_priority, decide, layer1,
+                     plan_labels, repo_specialties)
 from jev_tag import (Gh, GhError, apply_decision, codex_focus,
                      escalation_comment, find_marker,
                      match_user_facing_label, marker_body,
@@ -93,11 +93,57 @@ def self_test():
     check("human security floor", d2["security_band"] == "high"
           and d2["codex_post"] is False
           and d2["human_security_label"] is True)
-    soft = layer1({"files": [{"path": "src/page.tsx", "additions": 3,
-                              "deletions": 1}],
-                   "pr_title": "fix seo meta", "issue": None,
-                   "pr_body": "uses the token count from the design"})
-    check("layer1 soft keyword", soft["any"] and not soft["hard"])
+    fix488 = {"files": [
+        {"path": "src/components/design-tokens.css", "additions": 40,
+         "deletions": 10},
+        {"path": "docs/design/tokens.md", "additions": 12,
+         "deletions": 2}],
+        "pr_title": "Token usage sweep (Refs #488)", "issue": None,
+        "pr_body": ("Replace hardcoded colour values with design "
+                    "tokens; the token budget is unchanged.")}
+    l1_488 = layer1(fix488)
+    check("488 design tokens no layer1 hit", not l1_488["any"])
+    check("layer1 evidence by category",
+          l1_488["evidence"] == {}
+          and layer1(b)["evidence"].get("auth")
+          == ["src/auth/login.ts"])
+    check("layer1 .env is critical secrets",
+          layer1({"files": [{"path": ".env.production",
+                             "additions": 1, "deletions": 0}],
+                  "pr_title": "t", "pr_body": "", "issue": None}
+                 )["critical"] is True)
+    check("layer1 access.js stem word matches",
+          "auth" in layer1({"files": [{"path": "src/lib/access.js",
+                                       "additions": 5,
+                                       "deletions": 1}],
+                            "pr_title": "t", "pr_body": "",
+                            "issue": None})["categories"])
+    check("layer1 no substring hits",
+          not layer1({"files": [{"path": "src/tokenizer.ts",
+                                 "additions": 5, "deletions": 1}],
+                      "pr_title": "t", "pr_body": "",
+                      "issue": None})["any"])
+    check("layer1 component whole word only",
+          not layer1({"files": [{"path": "src/keyboard/x.ts",
+                                 "additions": 5, "deletions": 1}],
+                      "pr_title": "t", "pr_body": "",
+                      "issue": None})["any"])
+    check("layer1 keyword scan gone",
+          not layer1({"files": [{"path": "src/page.tsx",
+                                 "additions": 3, "deletions": 1}],
+                      "pr_title": "fix seo meta", "issue": None,
+                      "pr_body": ("uses the token count from the "
+                                  "design")})["any"])
+    check("layer1 design tokens keep real paths",
+          layer1({"files": [
+              {"path": "src/auth/tokens.ts", "additions": 5,
+               "deletions": 1},
+              {"path": "certs/access-tokens.key", "additions": 1,
+               "deletions": 0},
+              {"path": ".github/workflows/rotate-tokens.yml",
+               "additions": 2, "deletions": 0}],
+              "pr_title": "t", "pr_body": "", "issue": None})
+          ["categories"] == ["auth", "infra-CI", "secrets"])
     check("layer1 path hard", layer1(b)["hard"])
     low = {"answers": {
         "security_related": {"type": "noul", "noul": 0.19},
@@ -106,16 +152,72 @@ def self_test():
                         "probabilities": {"bug": 0.8}},
         "priority": {"type": "choice", "choice": "P3",
                      "probabilities": {"P3": 0.6}}}}
-    d4 = decide(bundle, soft, low)
-    check("soft hit mid band no post", d4["security_band"] == "mid"
+    d4 = decide(bundle, l1_488, low)
+    check("488 low band no post (P1 = flagship bug floor)",
+          d4["security_band"] == "low"
           and d4["codex_post"] is False
-          and "security" in d4["types"])
+          and "security" not in d4["types"]
+          and d4["security_type_warranted"] is False
+          and d4["priority"] == "P1")
+    ans488 = {"answers": {
+        "security_related": {"type": "noul", "noul": 0.06},
+        "security_category": {"type": "choice", "choice": "none",
+                              "probabilities": {"none": 0.9}},
+        "blast_radius": {"type": "score", "score": 2.0},
+        "change_type": {"type": "choice", "choice": "refactor",
+                        "probabilities": {"refactor": 0.8}},
+        "priority": {"type": "choice", "choice": "P3",
+                     "probabilities": {"P3": 0.6}}}}
+    d488 = decide(dict(bundle, files=fix488["files"]), l1_488, ans488)
+    check("488 fixture no security no P1",
+          d488["security_band"] == "low"
+          and "security" not in d488["types"]
+          and d488["types"] == ["refactor"]
+          and d488["priority"] == "P3"
+          and d488["codex_post"] is False)
+    mid_none = {"answers": {
+        "security_related": {"type": "noul", "noul": 0.53},
+        "security_category": {"type": "choice", "choice": "none",
+                              "probabilities": {"none": 0.8}},
+        "blast_radius": {"type": "score", "score": 3.0},
+        "change_type": {"type": "choice", "choice": "refactor",
+                        "probabilities": {"refactor": 0.8}},
+        "priority": {"type": "choice", "choice": "P2",
+                     "probabilities": {"P2": 0.7}}}}
+    d9 = decide(bundle, plain, mid_none)
+    check("3109 mid band category none no security type",
+          d9["security_band"] == "mid"
+          and d9["security_type_warranted"] is False
+          and "security" not in d9["types"]
+          and d9["priority"] == "P2")
+    pick_sec = {"answers": dict(mid_none["answers"], change_type={
+        "type": "choice", "choice": "security",
+        "probabilities": {"security": 0.7, "refactor": 0.2}})}
+    d11 = decide(bundle, plain, pick_sec)
+    check("change_type security pick needs the warrant",
+          "security" not in d11["types"]
+          and d11["security_type_warranted"] is False)
+    mid_cat = {"answers": dict(mid_none["answers"], security_category={
+        "type": "choice", "choice": "auth",
+        "probabilities": {"auth": 0.7}})}
+    d10 = decide(bundle, plain, mid_cat)
+    check("mid band with category agreement gets security type",
+          d10["security_type_warranted"] is True
+          and "security" in d10["types"])
+    oos = {"answers": dict(mid_none["answers"], security_category={
+        "type": "choice", "choice": "crypto",
+        "probabilities": {"crypto": 0.7}})}
+    d12 = decide(bundle, plain, oos)
+    check("out-of-schema jev category never warrants",
+          d12["security_category"] is None
+          and d12["security_type_warranted"] is False
+          and "security" not in d12["types"])
     low4 = {"answers": dict(low["answers"],
                             blast_radius={"type": "score",
                                           "score": 3.4})}
-    d5 = decide(bundle, soft, low4)
-    check("soft hit blast4 low psec no post",
-          d5["security_band"] == "mid" and d5["codex_post"] is False)
+    d5 = decide(bundle, plain, low4)
+    check("low psec has no band to escalate",
+          d5["security_band"] == "low" and d5["codex_post"] is False)
     mid = {"answers": {
         "security_related": {"type": "noul", "noul": 0.6},
         "blast_radius": {"type": "score", "score": 3.4},
@@ -123,7 +225,7 @@ def self_test():
                         "probabilities": {"bug": 0.8}},
         "priority": {"type": "choice", "choice": "P2",
                      "probabilities": {"P2": 0.6}}}}
-    d7 = decide(bundle, soft, mid)
+    d7 = decide(bundle, plain, mid)
     check("mid band blast4 posts", d7["security_band"] == "mid"
           and d7["codex_post"] is True)
     d8 = decide(sec_bundle, plain, mid)
@@ -150,6 +252,10 @@ def self_test():
     big["readme"] = "y" * 50000
     st = build_state(big, plain)
     check("state budget", len(st.encode("utf-8")) <= STATE_BUDGET + 64)
+    st_ev = build_state(big, layer1(b))
+    check("state evidence section",
+          "Deterministic evidence (facts only" in st_ev
+          and "- auth: src/auth/login.ts" in st_ev)
     print("SELF-TEST " + ("OK" if ok else "FAILED"))
     return 0 if ok else 1
 
@@ -510,6 +616,8 @@ def v2_tests():
           "No linked issue found" in body)
     check("restyle hides the raw marker JSON",
           '"pr_applied"' not in visible and "{" not in visible)
+    check("restyle footer carries the version",
+          f"<sub>jev-tag v{VERSION}</sub>" in body)
     body = marker_body(state, d, [], ["P2"], False, issue_number=55)
     check("restyle issue labels line, no flag",
           "**Issue #55 labels:**" in body
