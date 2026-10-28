@@ -41,7 +41,11 @@ STATE_BUDGET = 27000          # bytes; Jev long-context mode starts ~32k
 # materially, so runs across this boundary are not comparable.
 # v2.0.1 = dotted compound stems (auth.service.ts) tokenize on dots
 # too, restoring their Layer 1 evidence (Kody finding on PR #27).
-VERSION = "2.0.1"
+# v2.0.2 = data-PII Layer 1 hits matched only by tech words (d1,
+# migration, bare .sql) are data evidence, not security evidence:
+# they no longer band high, warrant type:security or post Codex
+# on their own (folio-app #3118, +8h audit 2026-10-28).
+VERSION = "2.0.2"
 
 # Fleet label schema v4.2 generic set (53). Anything in a repo's live
 # label list NOT in this set counts as a repo specialty label.
@@ -127,6 +131,17 @@ COMPONENT_WORDS = [
                   "personal", "gdpr", "migration", "migrations",
                   "d1"}),
 ]
+# The data-PII vocabulary mixes two kinds of words. PERSON words
+# (user, account, pii, ...) mean the path plausibly carries
+# personal data: security evidence. TECH words (d1, migration)
+# and the bare .sql extension only say a data layer is involved:
+# data evidence, NOT security evidence. folio-app #3118 (price
+# history guards; the sole hit was the "d1" in price-history-d1.ts,
+# Jev P(security) 0.14) got type:security + a high band + a Codex
+# post from a tech word alone.
+PERSON_DATA_WORDS = {"user", "users", "account", "accounts",
+                     "pii", "personal", "gdpr"}
+TECH_DATA_WORDS = {"migration", "migrations", "d1"}
 WEBHOOK_WORDS = {"webhook", "webhooks"}
 UPLOAD_WORDS = {"upload", "uploads", "multipart"}
 INFRA_DIRS = {"terraform", "infra", "infrastructure"}
@@ -145,15 +160,18 @@ DEP_MANIFESTS = {
 
 
 def _path_categories(path):
-    """(categories, critical) for one changed path, by directory
-    semantics: whole directory components and whole filename-stem
-    words only. Design-token files (styling values) get no
-    stem-word matches, so token semantics can never create
-    evidence on their own; directory words and the exact
-    basename/extension rules still apply to them."""
+    """(categories, critical, security_categories) for one changed
+    path, by directory semantics: whole directory components and
+    whole filename-stem words only. Design-token files (styling
+    values) get no stem-word matches, so token semantics can never
+    create evidence on their own; directory words and the exact
+    basename/extension rules still apply to them.
+    security_categories is the subset of categories that count as
+    SECURITY evidence: every category except a data-PII hit whose
+    only matched words are tech words (or the bare .sql rule)."""
     comps = [c for c in path.lower().split("/") if c]
     if not comps:
-        return set(), False
+        return set(), False, set()
     base = comps[-1]
     stem = base.rsplit(".", 1)[0] if "." in base else base
     ext = "." + base.rsplit(".", 1)[1] if "." in base else ""
@@ -198,22 +216,33 @@ def _path_categories(path):
             or base == "docker-compose"
             or base.startswith("docker-compose.")):
         cats.add("infra-CI")
-    return cats, crit
+    sec_cats = set(cats)
+    if "data-PII" in sec_cats and not (words & PERSON_DATA_WORDS):
+        # Matched only by tech words (d1, migration) and/or the
+        # .sql extension rule above: data evidence only.
+        sec_cats.discard("data-PII")
+    return cats, crit, sec_cats
 
 
 def layer1(bundle):
     """Deterministic PATH evidence: per-category matched file lists.
-    Every hit is a "hard" hit (paths only; there is no text scan),
-    so any hit bands security high and warrants the security type
-    on its own. `critical` marks the sensitive-filename allowlist
-    (.env*, key material, credential files)."""
+    Every hit is a "hard" hit (paths only; there is no text scan).
+    `security_hard` is the subset of hits that count as security
+    evidence (see _path_categories): only security_hard bands
+    security high, warrants the security type and posts Codex on
+    its own; a tech-only data-PII hit is recorded as evidence but
+    does none of those. `critical` marks the sensitive-filename
+    allowlist (.env*, key material, credential files)."""
     hits = []
     evidence = {}
     critical = False
+    security_any = False
     for f in bundle["files"]:
         path = f["path"]
-        cats, crit = _path_categories(path)
+        cats, crit, sec_cats = _path_categories(path)
         critical = critical or crit
+        if sec_cats:
+            security_any = True
         for cat in sorted(cats):
             hits.append({"kind": "path", "match": path,
                          "category": cat, "critical": crit})
@@ -233,6 +262,7 @@ def layer1(bundle):
         # Kept for decide() and the record format: every Layer 1
         # hit is a path hit, so hard == any.
         "hard": len(uniq) > 0,
+        "security_hard": security_any,
         "categories": sorted(evidence),
     }
 
@@ -401,9 +431,10 @@ def build_state(bundle, l1):
                  for cat, paths in sorted(evidence.items())]
         parts.append(
             "Deterministic evidence (facts only: these changed-file "
-            "paths matched security-relevant path categories; they "
-            "are not conclusions, whether the change is actually "
-            "security-related is for the questions to judge):\n"
+            "paths matched deterministic path categories (security, "
+            "data, infra, dependencies); they are not conclusions, "
+            "whether the change is actually security-related is "
+            "for the questions to judge):\n"
             + "\n".join(lines))
     else:
         parts.append(
@@ -569,7 +600,14 @@ def decide(bundle, l1, jev, prior=None):
     d["p_secrets_in_text"] = secrets_txt
     l1_hard = bool(l1.get("hard"))
     d["layer1_hard"] = l1_hard
-    if l1_hard or human_sec or (p_sec is not None and p_sec >= SEC_HIGH):
+    # Security decisions key off security_hard, not any hard hit:
+    # a tech-only data-PII hit (d1 / migration / .sql) is evidence
+    # for Jev but must not band, warrant or post on its own
+    # (folio-app #3118). Fixtures built before security_hard
+    # existed fall back to hard.
+    l1_sec = bool(l1.get("security_hard", l1.get("hard")))
+    d["layer1_security_hard"] = l1_sec
+    if l1_sec or human_sec or (p_sec is not None and p_sec >= SEC_HIGH):
         band = "high"
     elif ((p_sec is not None and p_sec >= SEC_MID)
           or (secrets_txt is not None and secrets_txt >= SEC_HIGH)):
@@ -582,22 +620,23 @@ def decide(bundle, l1, jev, prior=None):
     cat, _ = top_choice(answers.get("security_category"))
     d["security_category"] = cat if cat in SEC_CATEGORIES else None
     # The security TYPE needs its own warrant, stricter than the
-    # band. It comes from exactly two sources: (a) a Layer 1 hard
-    # PATH hit (or the human-label floor), or (b) Jev's own verdict
-    # with category agreement: a mid-band-or-higher probability
-    # whose own security_category answer is a real category, not
-    # "none". A bare mid-band probability with category "none"
-    # (folio-app #3109) applied type:security to a non-security PR
-    # in apply mode, and the type then cascaded into the flagship
-    # priority floor. Jev's secrets_in_text at high is a direct
-    # detection of pasted secret material and also warrants.
+    # band. It comes from exactly two sources: (a) a Layer 1
+    # SECURITY hard PATH hit (or the human-label floor), or (b)
+    # Jev's own verdict with category agreement: a
+    # mid-band-or-higher probability whose own security_category
+    # answer is a real category, not "none". A bare mid-band
+    # probability with category "none" (folio-app #3109) applied
+    # type:security to a non-security PR in apply mode, and the
+    # type then cascaded into the flagship priority floor. Jev's
+    # secrets_in_text at high is a direct detection of pasted
+    # secret material and also warrants.
     cat_agrees = cat in SEC_CATEGORIES and cat != "none"
     sec_type_warranted = (
-        l1_hard or human_sec
+        l1_sec or human_sec
         or (secrets_txt is not None and secrets_txt >= SEC_HIGH)
         or (p_sec is not None and p_sec >= SEC_MID and cat_agrees))
     d["security_type_warranted"] = bool(sec_type_warranted)
-    # The Codex post fires on a HARD Layer 1 path hit or a high Jev
+    # The Codex post fires on a SECURITY hard Layer 1 hit or a high Jev
     # probability (the spec's post rule), or on the spec's mid-band
     # blast upgrade: Jev probability in the mid range with blast
     # radius >= 4, whatever else set the band. The human-label
@@ -605,7 +644,7 @@ def decide(bundle, l1, jev, prior=None):
     # own, and the floor must never suppress an escalation Jev's
     # own signals earned.
     codex_post = (
-        l1_hard
+        l1_sec
         or (p_sec is not None and p_sec >= SEC_HIGH)
         or (p_sec is not None and p_sec >= SEC_MID
             and blast is not None and blast >= 4))
