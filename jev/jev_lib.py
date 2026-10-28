@@ -447,6 +447,10 @@ def decide(bundle, l1, jev, prior=None):
         if (name in SCHEMA_TYPES and name not in types
                 and p >= TYPE_SECOND_MIN and len(types) < 3):
             types.append(name)
+    # A change_type pick can also place "security" in types directly;
+    # the warrant governs that path too, or it bypasses the check.
+    if "security" in types and not sec_type_warranted:
+        types = [t for t in types if t != "security"]
     if (band in ("high", "mid") and sec_type_warranted
             and "security" not in types):
         if len(types) < 3:

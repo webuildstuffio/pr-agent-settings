@@ -122,6 +122,15 @@ def self_test():
           d9["security_band"] == "mid"
           and "security" not in d9["types"]
           and d9["security_type_warranted"] is False)
+    pick_sec = {"answers": dict(mid_none["answers"],
+        security_related={"type": "noul", "noul": 0.06},
+        change_type={"type": "choice", "choice": "feature",
+                     "probabilities": {"feature": 0.6,
+                                       "security": 0.35}})}
+    d11 = decide(bundle, soft, pick_sec)
+    check("change_type security pick still needs warrant",
+          "security" not in d11["types"]
+          and "feature" in d11["types"])
     mid_cat = {"answers": dict(mid_none["answers"],
         security_category={"type": "choice", "choice": "auth",
                            "probabilities": {"auth": 0.6}})}
