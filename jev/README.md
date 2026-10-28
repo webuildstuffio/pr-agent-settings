@@ -15,7 +15,7 @@ the end of the `qodo-review.yml` `suggest` job in pilot repos and:
 4. Adds schema-v4.2 labels to the PR and its linked issue, and posts
    `@codex security review` once when the post rule fires: a hard
    Layer 1 hit (a rule-matched path or a critical keyword), a high
-   Jev security probability, or a mid-band change with blast
+   Jev security probability, or a mid-range Jev probability with blast
    radius 4+. Soft keyword hits alone label type:security without
    posting.
 

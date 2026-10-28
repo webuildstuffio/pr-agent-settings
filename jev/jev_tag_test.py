@@ -111,8 +111,21 @@ def self_test():
                             blast_radius={"type": "score",
                                           "score": 3.4})}
     d5 = decide(bundle, soft, low4)
-    check("soft hit blast4 posts", d5["security_band"] == "mid"
-          and d5["codex_post"] is True)
+    check("soft hit blast4 low psec no post",
+          d5["security_band"] == "mid" and d5["codex_post"] is False)
+    mid = {"answers": {
+        "security_related": {"type": "noul", "noul": 0.6},
+        "blast_radius": {"type": "score", "score": 3.4},
+        "change_type": {"type": "choice", "choice": "bug",
+                        "probabilities": {"bug": 0.8}},
+        "priority": {"type": "choice", "choice": "P2",
+                     "probabilities": {"P2": 0.6}}}}
+    d7 = decide(bundle, soft, mid)
+    check("mid band blast4 posts", d7["security_band"] == "mid"
+          and d7["codex_post"] is True)
+    d8 = decide(sec_bundle, plain, mid)
+    check("human floor keeps blast escalation",
+          d8["security_band"] == "high" and d8["codex_post"] is True)
     d6 = decide(bundle, layer1(b), None)
     check("path hit posts without jev", d6["security_band"] == "high"
           and d6["codex_post"] is True)

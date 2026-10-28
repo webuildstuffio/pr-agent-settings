@@ -408,13 +408,17 @@ def decide(bundle, l1, jev, prior=None):
     cat, _ = top_choice(answers.get("security_category"))
     d["security_category"] = cat if cat in SEC_CATEGORIES else None
     # The Codex post fires on a HARD Layer 1 hit or a high Jev
-    # probability (the spec's post rule), or when a mid-band change
-    # has blast radius >= 4. Soft keyword hits and the human-label
-    # floor raise the band for labels, but do not post on their own.
+    # probability (the spec's post rule), or on the spec's mid-band
+    # blast upgrade: Jev probability in the mid range with blast
+    # radius >= 4, whatever else set the band. Soft keyword hits
+    # and the human-label floor raise the band for labels, but do
+    # not post on their own, and the floor must never suppress an
+    # escalation Jev's own signals earned.
     codex_post = (
         l1_hard
         or (p_sec is not None and p_sec >= SEC_HIGH)
-        or (band == "mid" and blast is not None and blast >= 4))
+        or (p_sec is not None and p_sec >= SEC_MID
+            and blast is not None and blast >= 4))
     d["codex_post"] = bool(codex_post)
 
     # --- types (1-3)
