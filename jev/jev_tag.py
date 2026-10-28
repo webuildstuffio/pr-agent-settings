@@ -222,7 +222,8 @@ def marker_body(state, d, adds_pr, adds_issue, codex_now,
         sec += f" · area: {cat}"
     l1 = d.get("layer1") or {}
     if l1.get("any"):
-        hits = ", ".join(h["match"] for h in l1["hits"][:2])
+        hits = ", ".join(_code_span(h["match"])
+                         for h in l1["hits"][:2])
         sec += f" · rule hits: {hits}"
     if codex_now:
         sec += " · Codex review **requested**"
@@ -302,6 +303,17 @@ def match_user_facing_label(repo_labels):
     return matches[0]
 
 
+def _code_span(text):
+    """Render an author-controlled string (a file path or area name)
+    as an inline code span in a bot-posted comment: code spans
+    suppress @mentions and markdown, so a crafted path cannot fire
+    a mention or inject markup (Kody security finding on PR 26).
+    Backticks and newlines inside the value are neutralized so the
+    span cannot be broken out of."""
+    return "`" + text.replace("`", "'").replace("\r", " ") \
+        .replace("\n", " ") + "`"
+
+
 def codex_focus(d):
     """Codex trigger comment body: the exact trigger string verbatim
     on line 1 (so the mention parses as the review request, not a
@@ -325,10 +337,12 @@ def codex_focus(d):
         if h.get("kind") == "path" and h.get("match") not in files:
             files.append(h["match"])
     if files:
-        lines.append("- Files of concern: " + ", ".join(files[:5]))
+        lines.append("- Files of concern: "
+                     + ", ".join(_code_span(f) for f in files[:5]))
     elif d.get("top_areas"):
         lines.append("- Areas of concern: "
-                     + ", ".join(d["top_areas"]))
+                     + ", ".join(_code_span(a)
+                                 for a in d["top_areas"]))
     if d.get("perf_flag"):
         lines.append("- Performance risk also flagged by Jev")
     return "\n".join(lines)
@@ -347,7 +361,9 @@ def escalation_comment(d):
     if d.get("blast_radius") is not None:
         concerns.append(f"blast radius {d['blast_radius']} of 5")
     if d.get("top_areas"):
-        concerns.append("affected areas: " + ", ".join(d["top_areas"]))
+        concerns.append("affected areas: "
+                        + ", ".join(_code_span(a)
+                                    for a in d["top_areas"]))
     if d.get("themes"):
         concerns.append("themes: " + ", ".join(d["themes"]))
     focus = (" Focus on: " + "; ".join(concerns) + "."

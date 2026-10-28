@@ -488,6 +488,14 @@ def v2_tests():
           and "blast radius 4 of 5" in body
           and "src/auth/login.ts" in body
           and "Performance risk" in body)
+    l1_evil = layer1({"files": [{"path": "src/auth/@someuser.ts",
+                                 "additions": 5, "deletions": 1}],
+                      "pr_title": "t", "pr_body": "", "issue": None})
+    d = decide(mk_bundle(), l1_evil, mk_answers(
+        security_related={"type": "noul", "noul": 0.93}))
+    body = codex_focus(d)
+    check("codex focus escapes crafted paths",
+          "- Files of concern: `src/auth/@someuser.ts`" in body)
 
     # --- marker body restyle
     state = {"pr_applied": [], "issue_applied": [],
