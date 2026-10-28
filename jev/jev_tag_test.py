@@ -4,6 +4,7 @@
 Run: python3 jev_tag_test.py — exits non-zero on any FAIL.
 """
 
+import json
 import os
 import sys
 
@@ -121,6 +122,37 @@ class FakeGh:
         return {}
 
 
+class FakeGh2:
+    """Gh stand-in with a preset comment history; records label posts
+    per issue number and comment posts."""
+
+    def __init__(self, comments=None, fail_comments=False):
+        self.comments = comments or []
+        self.fail_comments = fail_comments
+        self.label_posts = {}
+        self.comment_posts = []
+
+    def get_all(self, path):
+        if self.fail_comments:
+            raise GhError("boom")
+        return self.comments
+
+    def call(self, method, path, body=None, ok_missing=False):
+        if path.endswith("/labels"):
+            num = int(path.split("/")[-2])
+            self.label_posts[num] = body["labels"]
+            return {}
+        if path.endswith("/comments"):
+            self.comment_posts.append(body)
+            return {}
+        return {}
+
+
+def marker_comment(state):
+    return {"user": {"login": "github-actions[bot]"},
+            "body": "<!-- jev-tag:v1 " + json.dumps(state) + " --> x"}
+
+
 def apply_tests():
     ok = True
 
@@ -155,6 +187,22 @@ def apply_tests():
     check("applied labels recorded", out["pr_added"] == ["P2", "type:bug"]
           and len(gh.posts) == 1
           and '"pr_applied":["P2","type:bug"]' in gh.posts[0]["body"])
+    gh = FakeGh2(fail_comments=True)
+    out = apply_decision(gh, bundle, dict(d))
+    check("comments failure aborts writes", out["errors"] != []
+          and gh.label_posts == {} and gh.comment_posts == [])
+    state5 = {"pr_applied": [], "issue_applied": ["P2"],
+              "issue_number": 5, "codex_posted": False, "runs": 1}
+    bundle9 = {"repo": "o/r", "pr_number": 7, "pr_labels": [],
+               "issue": {"number": 9, "title": "t", "body": "",
+                         "labels": []}}
+    gh = FakeGh2(comments=[marker_comment(state5)])
+    out = apply_decision(gh, bundle9, dict(d))
+    check("issue switch not vetoed", "P2" in gh.label_posts.get(9, []))
+    state9 = dict(state5, issue_number=9)
+    gh = FakeGh2(comments=[marker_comment(state9)])
+    out = apply_decision(gh, bundle9, dict(d))
+    check("same issue veto holds", "P2" not in gh.label_posts.get(9, []))
     print("APPLY-TEST " + ("OK" if ok else "FAILED"))
     return 0 if ok else 1
 

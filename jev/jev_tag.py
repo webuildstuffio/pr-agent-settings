@@ -163,7 +163,8 @@ def find_marker(comments):
             except ValueError:
                 continue
     return None, {"pr_applied": [], "issue_applied": [],
-                  "codex_posted": False, "runs": 0}
+                  "issue_number": None, "codex_posted": False,
+                  "runs": 0}
 
 
 def marker_body(state, d, adds_pr, adds_issue, codex_now):
@@ -204,11 +205,16 @@ def apply_decision(gh, bundle, d):
     try:
         comments = gh.get_all(f"/repos/{repo}/issues/{pr_no}/comments")
     except GhError as exc:
-        out["errors"].append(str(exc))
-        comments = []
+        # Vetoes and the Codex dedupe depend on the real comment
+        # history; on retrieval failure, write nothing at all and
+        # let a later run retry with the actual marker.
+        out["errors"].append(
+            f"comments fetch failed, apply aborted: {exc}")
+        return out
     marker_comment, state = find_marker(comments)
     state.setdefault("pr_applied", [])
     state.setdefault("issue_applied", [])
+    state.setdefault("issue_number", None)
     state.setdefault("codex_posted", False)
     state.setdefault("runs", 0)
 
@@ -219,6 +225,12 @@ def apply_decision(gh, bundle, d):
     issue = bundle["issue"]
     adds_issue, vetoed_issue = [], []
     if issue:
+        # Applied-label history belongs to one specific issue; if the
+        # PR now links a different issue, that history does not apply
+        # (its absences are not human removals on the new issue).
+        if state.get("issue_number") != issue["number"]:
+            state["issue_applied"] = []
+            state["issue_number"] = issue["number"]
         vetoed_issue = sorted(set(state["issue_applied"]) - set(issue["labels"]))
         out["vetoed_issue"] = vetoed_issue
         adds_issue = plan_labels(d["labels_desired"], issue["labels"],
