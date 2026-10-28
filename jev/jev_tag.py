@@ -148,8 +148,14 @@ def fetch_bundle(gh, repo, pr_number, workdir):
 
 
 def find_marker(comments):
-    """(comment, state dict) of the newest jev-tag marker comment."""
+    """(comment, state dict) of the newest jev-tag marker comment.
+
+    Only github-actions[bot] markers are trusted: anyone who can
+    comment could otherwise forge state to suppress the Codex
+    security trigger or veto labels."""
     for c in reversed(comments):
+        if (c.get("user") or {}).get("login") != "github-actions[bot]":
+            continue
         m = MARKER_RE.search(c.get("body") or "")
         if m:
             try:
@@ -219,19 +225,25 @@ def apply_decision(gh, bundle, d):
                                  set(vetoed_issue))
 
     def add_labels(number, labels):
+        """POST labels; return only the labels actually applied, so a
+        failed write is never recorded as applied (which the next run
+        would misread as a human removal and veto forever)."""
         if not labels:
-            return
+            return []
         try:
             gh.call("POST", f"/repos/{repo}/issues/{number}/labels",
                     {"labels": labels})
+            return labels
         except GhError as exc:
             out["errors"].append(f"labels #{number}: {exc}")
+            return []
 
-    add_labels(pr_no, adds_pr)
-    out["pr_added"] = adds_pr
+    applied_pr = add_labels(pr_no, adds_pr)
+    out["pr_added"] = applied_pr
+    applied_issue = []
     if issue:
-        add_labels(issue["number"], adds_issue)
-        out["issue_added"] = adds_issue
+        applied_issue = add_labels(issue["number"], adds_issue)
+        out["issue_added"] = applied_issue
 
     # Codex security trigger: once only, deduped against any existing
     # mention in the PR comments (marker comments excluded).
@@ -251,15 +263,15 @@ def apply_decision(gh, bundle, d):
             out["errors"].append(f"codex comment: {exc}")
     out["codex_posted_now"] = codex_now
 
-    state["pr_applied"] = sorted(set(state["pr_applied"]) | set(adds_pr))
-    state["issue_applied"] = sorted(set(state["issue_applied"]) | set(adds_issue))
+    state["pr_applied"] = sorted(set(state["pr_applied"]) | set(applied_pr))
+    state["issue_applied"] = sorted(set(state["issue_applied"]) | set(applied_issue))
     state["codex_posted"] = bool(state["codex_posted"] or codex_now)
     state["runs"] = int(state.get("runs") or 0) + 1
-    body = marker_body(state, d, adds_pr, adds_issue, codex_now)
+    body = marker_body(state, d, applied_pr, applied_issue, codex_now)
     try:
         if marker_comment:
             gh.call("PATCH", f"/repos/{repo}/issues/comments/{marker_comment['id']}", {"body": body})
-        elif adds_pr or adds_issue or codex_now:
+        elif applied_pr or applied_issue or codex_now:
             gh.call("POST", f"/repos/{repo}/issues/{pr_no}/comments",
                     {"body": body})
     except GhError as exc:

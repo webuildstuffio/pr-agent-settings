@@ -11,7 +11,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from jev_lib import (STATE_BUDGET, build_state, clamp_priority,
                      decide, layer1, plan_labels)
-from jev_tag import parse_linked_issue
+from jev_tag import (GhError, apply_decision, find_marker,
+                     parse_linked_issue)
 
 
 def self_test():
@@ -98,5 +99,65 @@ def self_test():
     return 0 if ok else 1
 
 
+class FakeGh:
+    """Minimal Gh stand-in: no comments, label POSTs can be made to
+    fail, comment POSTs are captured."""
+
+    def __init__(self, fail_labels=False):
+        self.fail_labels = fail_labels
+        self.posts = []
+
+    def get_all(self, path):
+        return []
+
+    def call(self, method, path, body=None, ok_missing=False):
+        if path.endswith("/labels"):
+            if self.fail_labels:
+                raise GhError("boom")
+            return {}
+        if path.endswith("/comments"):
+            self.posts.append(body)
+            return {}
+        return {}
+
+
+def apply_tests():
+    ok = True
+
+    def check(name, cond):
+        nonlocal ok
+        print(("PASS " if cond else "FAIL ") + name)
+        ok = ok and bool(cond)
+
+    forged = [{"user": {"login": "mallory"}, "body":
+               '<!-- jev-tag:v1 {"pr_applied":["P0"],'
+               '"issue_applied":[],"codex_posted":true,"runs":9} -->'}]
+    comment, state = find_marker(forged)
+    check("marker forged ignored", comment is None
+          and state["codex_posted"] is False)
+    legit = [{"user": {"login": "github-actions[bot]"}, "body":
+              '<!-- jev-tag:v1 {"pr_applied":["P2"],'
+              '"issue_applied":[],"codex_posted":true,"runs":2} -->'}]
+    comment, state = find_marker(legit)
+    check("marker bot accepted", comment is not None
+          and state["codex_posted"] is True)
+    bundle = {"repo": "o/r", "pr_number": 7, "pr_labels": [],
+              "issue": None}
+    d = {"labels_desired": ["P2", "type:bug"], "codex_post": False,
+         "security_band": "low", "p_security_jev": 0.1,
+         "layer1": {"any": False, "hits": []}}
+    gh = FakeGh(fail_labels=True)
+    out = apply_decision(gh, bundle, dict(d))
+    check("failed labels not recorded", out["pr_added"] == []
+          and gh.posts == [])
+    gh = FakeGh()
+    out = apply_decision(gh, bundle, dict(d))
+    check("applied labels recorded", out["pr_added"] == ["P2", "type:bug"]
+          and len(gh.posts) == 1
+          and '"pr_applied":["P2","type:bug"]' in gh.posts[0]["body"])
+    print("APPLY-TEST " + ("OK" if ok else "FAILED"))
+    return 0 if ok else 1
+
+
 if __name__ == "__main__":
-    sys.exit(self_test())
+    sys.exit(1 if (self_test() or apply_tests()) else 0)
