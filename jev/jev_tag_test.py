@@ -272,6 +272,27 @@ def apply_tests():
     gh = FakeGh2(comments=[marker_comment(state9)])
     out = apply_decision(gh, bundle9, dict(d))
     check("same issue veto holds", "P2" not in gh.label_posts.get(9, []))
+    d_sec = {"labels_desired": ["P1", "type:security"],
+             "codex_post": True, "security_band": "high",
+             "p_security_jev": 0.9, "layer1": {"any": True, "hits": []}}
+    codex_summary = [{
+        "user": {"login": "chatgpt-codex-connector[bot]"},
+        "body": ("<!-- codex-pull-request-review-summary -->\n"
+                 "<!-- codex-review-state:v1 {} -->\n"
+                 "Comment \"@codex review\" or "
+                 "\"@codex security review\".")}]
+    gh = FakeGh2(comments=codex_summary)
+    out = apply_decision(gh, bundle, dict(d_sec))
+    check("codex boilerplate does not dedupe the trigger",
+          out["codex_posted_now"] is True
+          and any(p.get("body") == "@codex security review"
+                  for p in gh.comment_posts))
+    human_mention = [{"user": {"login": "nichm"},
+                      "body": "@codex security review"}]
+    gh = FakeGh2(comments=human_mention)
+    out = apply_decision(gh, bundle, dict(d_sec))
+    check("human mention dedupes the trigger",
+          out["codex_posted_now"] is False)
     print("APPLY-TEST " + ("OK" if ok else "FAILED"))
     return 0 if ok else 1
 

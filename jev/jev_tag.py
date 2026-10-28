@@ -271,10 +271,24 @@ def apply_decision(gh, bundle, d, comments=None):
         out["issue_added"] = applied_issue
 
     # Codex security trigger: once only, deduped against any existing
-    # mention in the PR comments (marker comments excluded).
+    # mention in the PR comments (marker comments excluded). The
+    # Codex connector's own summary comment quotes the trigger phrase
+    # in its help boilerplate (Comment "@codex security review"),
+    # which is not a request: comments from that bot, and any comment
+    # carrying its summary markers, never count as a mention. (Live
+    # false positive on the first apply-mode PRs, 2026-10-28: the
+    # boilerplate suppressed the post on every high-band PR.)
+    def is_codex_boilerplate(c):
+        body = c.get("body") or ""
+        author = ((c.get("user") or {}).get("login") or "")
+        return (author == "chatgpt-codex-connector[bot]"
+                or "codex-pull-request-review-summary" in body
+                or "codex-review-state" in body)
+
     already_mentioned = any(
         "@codex security review" in (c.get("body") or "")
         and "jev-tag:v1" not in (c.get("body") or "")
+        and not is_codex_boilerplate(c)
         for c in comments)
     d["codex_posted_before"] = bool(state["codex_posted"]
                                     or already_mentioned)
