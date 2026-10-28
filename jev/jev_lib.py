@@ -407,6 +407,20 @@ def decide(bundle, l1, jev, prior=None):
     d["security_band"] = band
     cat, _ = top_choice(answers.get("security_category"))
     d["security_category"] = cat if cat in SEC_CATEGORIES else None
+    # The security TYPE needs its own warrant, stricter than the band:
+    # the band also rises on soft keyword hits (the word "token" in
+    # design-token prose, repo-review #488) and on Jev mid-band scores
+    # whose own category answer is "none" (folio-app #3109). Both
+    # applied type:security to non-security PRs in apply mode, and the
+    # type then cascaded into the flagship/active priority floors.
+    sec_type_warranted = (
+        l1_hard or human_sec
+        or (p_sec is not None and p_sec >= SEC_HIGH)
+        or (secrets_txt is not None and secrets_txt >= SEC_HIGH)
+        or (p_sec is not None and p_sec >= SEC_MID
+            and ((cat is not None and cat != "none")
+                 or (blast is not None and blast >= 4))))
+    d["security_type_warranted"] = bool(sec_type_warranted)
     # The Codex post fires on a HARD Layer 1 hit or a high Jev
     # probability (the spec's post rule), or on the spec's mid-band
     # blast upgrade: Jev probability in the mid range with blast
@@ -433,7 +447,8 @@ def decide(bundle, l1, jev, prior=None):
         if (name in SCHEMA_TYPES and name not in types
                 and p >= TYPE_SECOND_MIN and len(types) < 3):
             types.append(name)
-    if band in ("high", "mid") and "security" not in types:
+    if (band in ("high", "mid") and sec_type_warranted
+            and "security" not in types):
         if len(types) < 3:
             types.append("security")
         elif types:

@@ -106,7 +106,29 @@ def self_test():
     d4 = decide(bundle, soft, low)
     check("soft hit mid band no post", d4["security_band"] == "mid"
           and d4["codex_post"] is False
-          and "security" in d4["types"])
+          and "security" not in d4["types"]
+          and d4["security_type_warranted"] is False)
+    mid_none = {"answers": {
+        "security_related": {"type": "noul", "noul": 0.53},
+        "security_category": {"type": "choice", "choice": "none",
+                              "probabilities": {"none": 0.67}},
+        "blast_radius": {"type": "score", "score": 1.97},
+        "change_type": {"type": "choice", "choice": "bug",
+                        "probabilities": {"bug": 0.8}},
+        "priority": {"type": "choice", "choice": "P2",
+                     "probabilities": {"P2": 0.6}}}}
+    d9 = decide(bundle, plain, mid_none)
+    check("mid psec category none no security type",
+          d9["security_band"] == "mid"
+          and "security" not in d9["types"]
+          and d9["security_type_warranted"] is False)
+    mid_cat = {"answers": dict(mid_none["answers"],
+        security_category={"type": "choice", "choice": "auth",
+                           "probabilities": {"auth": 0.6}})}
+    d10 = decide(bundle, plain, mid_cat)
+    check("mid psec category agrees security type",
+          "security" in d10["types"]
+          and d10["security_type_warranted"] is True)
     low4 = {"answers": dict(low["answers"],
                             blast_radius={"type": "score",
                                           "score": 3.4})}

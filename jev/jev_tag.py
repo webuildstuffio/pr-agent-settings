@@ -122,6 +122,11 @@ def fetch_bundle(gh, repo, pr_number, workdir):
         "agents": "",
     }
     issue_no = parse_linked_issue(bundle["pr_body"])
+    if not issue_no:
+        # Fleet convention also puts the Refs reference in the title
+        # (repo-review #488 carried it only there and its linked
+        # issue silently got no labels).
+        issue_no = parse_linked_issue(bundle["pr_title"])
     if issue_no and issue_no != pr_number:
         issue = gh.call("GET", f"/repos/{repo}/issues/{issue_no}",
                         ok_missing=True)
