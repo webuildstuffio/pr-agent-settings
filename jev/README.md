@@ -7,17 +7,21 @@ the end of the `qodo-review.yml` `suggest` job in pilot repos and:
 
 1. Gathers PR state (PR text, changed files, linked issue, repo tier
    from the `rr-tier` property, README + AGENTS.md excerpts).
-2. Runs deterministic Layer 1 security rules over paths and text.
+2. Runs deterministic Layer 1 security rules over changed-file
+   paths only (whole directory components and filename-stem words;
+   no text or keyword scan — Jev reads the text itself). Layer 1
+   output is structured evidence: per-category matched file lists.
 3. Asks Jev (`typesafe/jev-1.14`, OpenRouter Decisions API) one request
    with the full label job sheet (security, type, priority, themes,
    effort, owner labels, plus record-only Codex-worth and low-risk
    signals).
 4. Adds schema-v4.2 labels to the PR and its linked issue, and posts
    `@codex security review` once when the post rule fires: a hard
-   Layer 1 hit (a rule-matched path or a critical keyword), a high
+   Layer 1 hit (a security-relevant changed-file path), a high
    Jev security probability, or a mid-range Jev probability with blast
-   radius 4+. Soft keyword hits alone label type:security without
-   posting.
+   radius 4+. The type:security label needs its own warrant: a hard
+   path hit, or Jev's own verdict with category agreement (a real
+   security category, not "none") at the mid band or above.
 
 Guardrails: Jev can only upgrade security, never downgrade a Layer 1
 hit or a human label; the step never removes labels; labels a human

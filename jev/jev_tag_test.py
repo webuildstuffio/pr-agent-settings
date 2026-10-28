@@ -90,12 +90,43 @@ def self_test():
     check("human security floor", d2["security_band"] == "high"
           and d2["codex_post"] is False
           and d2["human_security_label"] is True)
-    soft = layer1({"files": [{"path": "src/page.tsx", "additions": 3,
-                              "deletions": 1}],
-                   "pr_title": "fix seo meta", "issue": None,
-                   "pr_body": "uses the token count from the design"})
-    check("layer1 soft keyword", soft["any"] and not soft["hard"])
+    # Regression fixture, repo-review #488: design-token prose (the
+    # word "token") plus design-token file paths. The old keyword
+    # scan and separator regexes hard-hit this; paths and prose
+    # must now produce NO Layer 1 hit at all.
+    fix488 = {"files": [
+        {"path": "src/styles/design-tokens.css", "additions": 12,
+         "deletions": 3},
+        {"path": "src/theme/tokens.ts", "additions": 4,
+         "deletions": 1}],
+        "pr_title": "Refresh design tokens for the new palette",
+        "pr_body": "Token values updated; the token count is "
+                   "unchanged.",
+        "issue": None}
+    l1_488 = layer1(fix488)
+    check("488 fixture no layer1 hit", not l1_488["any"]
+          and not l1_488["hard"] and l1_488["evidence"] == {})
     check("layer1 path hard", layer1(b)["hard"])
+    check("layer1 evidence lists",
+          layer1(b)["evidence"].get("auth") == ["src/auth/login.ts"]
+          and layer1(b)["evidence"].get("dependencies")
+          == ["package.json"])
+    sens = layer1({"files": [{"path": ".env.local", "additions": 1,
+                              "deletions": 0},
+                             {"path": "certs/server.pem",
+                              "additions": 1, "deletions": 0}],
+                   "pr_title": "t", "pr_body": "", "issue": None})
+    check("layer1 sensitive files critical", sens["critical"]
+          and sens["categories"] == ["secrets"])
+    sub = layer1({"files": [{"path": "src/mywebhooknotes.md",
+                             "additions": 1, "deletions": 0},
+                            {"path": "docs/webhook-guide.md",
+                             "additions": 1, "deletions": 0},
+                            {"path": "src/upload/handler.ts",
+                             "additions": 1, "deletions": 0}],
+                  "pr_title": "t", "pr_body": "", "issue": None})
+    check("layer1 whole-word only", sub["evidence"].get("infra-CI")
+          == ["docs/webhook-guide.md", "src/upload/handler.ts"])
     low = {"answers": {
         "security_related": {"type": "noul", "noul": 0.19},
         "blast_radius": {"type": "score", "score": 2.0},
@@ -103,11 +134,28 @@ def self_test():
                         "probabilities": {"bug": 0.8}},
         "priority": {"type": "choice", "choice": "P3",
                      "probabilities": {"P3": 0.6}}}}
-    d4 = decide(bundle, soft, low)
-    check("soft hit mid band no post", d4["security_band"] == "mid"
+    d4 = decide(bundle, l1_488, low)
+    check("488 l1 + low psec: low band, no post, no security type",
+          d4["security_band"] == "low"
           and d4["codex_post"] is False
           and "security" not in d4["types"]
           and d4["security_type_warranted"] is False)
+    ans488 = {"answers": {
+        "security_related": {"type": "noul", "noul": 0.06},
+        "security_category": {"type": "choice", "choice": "none",
+                              "probabilities": {"none": 0.9}},
+        "change_type": {"type": "choice", "choice": "refactor",
+                        "probabilities": {"refactor": 0.8}},
+        "priority": {"type": "choice", "choice": "P2",
+                     "probabilities": {"P2": 0.7}},
+        "theme": {"type": "choice", "choice": "ux",
+                  "probabilities": {"ux": 0.5}}}}
+    d488 = decide(bundle, l1_488, ans488)
+    check("488 fixture: no band, no type, no P1 cascade",
+          d488["security_band"] == "low"
+          and d488["types"] == ["refactor"]
+          and d488["priority"] == "P2"
+          and d488["codex_post"] is False)
     mid_none = {"answers": {
         "security_related": {"type": "noul", "noul": 0.53},
         "security_category": {"type": "choice", "choice": "none",
@@ -118,16 +166,19 @@ def self_test():
         "priority": {"type": "choice", "choice": "P2",
                      "probabilities": {"P2": 0.6}}}}
     d9 = decide(bundle, plain, mid_none)
-    check("mid psec category none no security type",
+    # Regression fixture, folio-app #3109: mid-band P(security)
+    # 0.53 whose own category answer is "none" (0.67), blast 3.
+    check("3109 fixture mid psec category none no security type",
           d9["security_band"] == "mid"
           and "security" not in d9["types"]
-          and d9["security_type_warranted"] is False)
+          and d9["security_type_warranted"] is False
+          and d9["codex_post"] is False)
     pick_sec = {"answers": dict(mid_none["answers"],
         security_related={"type": "noul", "noul": 0.06},
         change_type={"type": "choice", "choice": "feature",
                      "probabilities": {"feature": 0.6,
                                        "security": 0.35}})}
-    d11 = decide(bundle, soft, pick_sec)
+    d11 = decide(bundle, plain, pick_sec)
     check("change_type security pick still needs warrant",
           "security" not in d11["types"]
           and "feature" in d11["types"])
@@ -141,9 +192,9 @@ def self_test():
     low4 = {"answers": dict(low["answers"],
                             blast_radius={"type": "score",
                                           "score": 3.4})}
-    d5 = decide(bundle, soft, low4)
-    check("soft hit blast4 low psec no post",
-          d5["security_band"] == "mid" and d5["codex_post"] is False)
+    d5 = decide(bundle, plain, low4)
+    check("no-hit blast4 low psec no post",
+          d5["security_band"] == "low" and d5["codex_post"] is False)
     mid = {"answers": {
         "security_related": {"type": "noul", "noul": 0.6},
         "blast_radius": {"type": "score", "score": 3.4},
@@ -151,7 +202,7 @@ def self_test():
                         "probabilities": {"bug": 0.8}},
         "priority": {"type": "choice", "choice": "P2",
                      "probabilities": {"P2": 0.6}}}}
-    d7 = decide(bundle, soft, mid)
+    d7 = decide(bundle, plain, mid)
     check("mid band blast4 posts", d7["security_band"] == "mid"
           and d7["codex_post"] is True)
     d8 = decide(sec_bundle, plain, mid)
@@ -178,6 +229,10 @@ def self_test():
     big["readme"] = "y" * 50000
     st = build_state(big, plain)
     check("state budget", len(st.encode("utf-8")) <= STATE_BUDGET + 64)
+    st2 = build_state(bundle, layer1(b))
+    check("state evidence section", "Deterministic evidence" in st2
+          and "- auth: src/auth/login.ts" in st2
+          and "facts only" in st2)
     print("SELF-TEST " + ("OK" if ok else "FAILED"))
     return 0 if ok else 1
 
