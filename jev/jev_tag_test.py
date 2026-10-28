@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from jev_lib import (STATE_BUDGET, build_state, clamp_priority,
                      decide, layer1, plan_labels)
-from jev_tag import (GhError, apply_decision, find_marker,
+from jev_tag import (Gh, GhError, apply_decision, find_marker,
                      parse_linked_issue)
 
 
@@ -85,6 +85,11 @@ def self_test():
               "tier": "flagship", "readme": "", "agents": ""}
     d = decide(bundle, plain, fake)
     check("decide band high", d["security_band"] == "high")
+    sec_bundle = dict(bundle, pr_labels=["type:security"])
+    d2 = decide(sec_bundle, plain, None)
+    check("human security floor", d2["security_band"] == "high"
+          and d2["codex_post"] is True
+          and d2["human_security_label"] is True)
     check("decide codex post", d["codex_post"] is True)
     check("decide security type", "security" in d["types"])
     check("decide flagship floor P1", d["priority"] == "P1")
@@ -153,6 +158,18 @@ def marker_comment(state):
             "body": "<!-- jev-tag:v1 " + json.dumps(state) + " --> x"}
 
 
+class PagedGh(Gh):
+    """Gh with a stubbed call() serving fixed pages."""
+
+    def __init__(self, pages):
+        super().__init__("x")
+        self.pages = pages
+
+    def call(self, method, path, body=None, ok_missing=False):
+        n = int(path.rsplit("page=", 1)[1])
+        return self.pages[n - 1] if n <= len(self.pages) else []
+
+
 def apply_tests():
     ok = True
 
@@ -160,6 +177,12 @@ def apply_tests():
         nonlocal ok
         print(("PASS " if cond else "FAIL ") + name)
         ok = ok and bool(cond)
+
+    pages = [[{}] * 100, [{}] * 100, [{}] * 37]
+    got = PagedGh(pages).get_all("/x")
+    check("pagination follows pages", len(got) == 237)
+    full = PagedGh([[{}] * 100 for _ in range(40)]).get_all("/x")
+    check("pagination cap 3000", len(full) == 3000)
 
     forged = [{"user": {"login": "mallory"}, "body":
                '<!-- jev-tag:v1 {"pr_applied":["P0"],'

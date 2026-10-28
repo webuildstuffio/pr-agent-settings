@@ -72,8 +72,10 @@ class Gh:
         except Exception as exc:  # network, timeout, JSON
             raise GhError(f"{method} {path} -> {exc}")
 
-    def get_all(self, path, limit_pages=10):
-        """GET a list endpoint, following ?page= pagination."""
+    def get_all(self, path, limit_pages=30):
+        """GET a list endpoint, following ?page= pagination. The cap
+        matches the GitHub API's own ceilings (e.g. 3,000 files per
+        PR); callers that care check for a full-cap result."""
         out = []
         sep = "&" if "?" in path else "?"
         for page in range(1, limit_pages + 1):
@@ -106,6 +108,9 @@ def fetch_bundle(gh, repo, pr_number, workdir):
     bundle = {
         "repo": repo,
         "pr_number": pr_number,
+        # The files API caps at 3,000 entries; a full-cap result may
+        # be incomplete, which the decision record must say out loud.
+        "files_truncated": len(files) >= 3000,
         "pr_title": pr.get("title") or "",
         "pr_body": pr.get("body") or "",
         "pr_author": (pr.get("user") or {}).get("login") or "",
@@ -313,6 +318,7 @@ def run(repo, pr_number, mode, workdir):
     record["linked_issue"] = (bundle["issue"] or {}).get("number")
     record["tier"] = bundle["tier"]
     record["files_count"] = len(bundle["files"])
+    record["files_truncated"] = bool(bundle.get("files_truncated"))
     jev = None
     try:
         jev = call_jev(state, os.environ.get("OPENROUTER_API_KEY"))

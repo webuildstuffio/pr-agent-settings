@@ -257,8 +257,10 @@ def build_state(bundle, l1):
         parts.append("Issue description:\n" + trunc_bytes(issue["body"] or "(empty)", 6000))
     lines = [f"{f['path']} (+{f['additions']} -{f['deletions']})"
              for f in bundle["files"]]
-    parts.append("Changed files:\n" + trunc_bytes(
-        "\n".join(lines) if lines else "(none)", 6000))
+    files_text = "\n".join(lines) if lines else "(none)"
+    if bundle.get("files_truncated"):
+        files_text += "\n(note: file list hit the API cap; may be incomplete)"
+    parts.append("Changed files:\n" + trunc_bytes(files_text, 6000))
     if l1["hits"]:
         desc = "; ".join(
             f"{h['kind']}:{h['match']} [{h['category']}]"
@@ -345,6 +347,13 @@ def decide(bundle, l1, jev):
         "answers": answers,
     }
     # --- security band
+    # A human-applied type:security on the PR or its linked issue is a
+    # deterministic security floor: Jev must never downgrade it, so it
+    # bands like a Layer 1 hit even when Jev is low or unavailable.
+    human_sec = "type:security" in bundle["pr_labels"] or bool(
+        bundle["issue"]
+        and "type:security" in bundle["issue"]["labels"])
+    d["human_security_label"] = human_sec
     p_sec = None
     if isinstance(answers.get("security_related"), dict):
         p_sec = answers["security_related"].get("noul")
@@ -359,7 +368,7 @@ def decide(bundle, l1, jev):
     if isinstance(answers.get("secrets_in_text"), dict):
         secrets_txt = answers["secrets_in_text"].get("noul")
     d["p_secrets_in_text"] = secrets_txt
-    if l1["any"]:
+    if l1["any"] or human_sec:
         band = "high"
     elif p_sec is not None and p_sec >= SEC_HIGH:
         band = "high"
