@@ -24,8 +24,9 @@ import sys
 import urllib.error
 import urllib.request
 
-from jev_lib import (TIERS, JevError, build_state, call_jev, decide,
-                     layer1, plan_labels)
+from jev_lib import (ESCALATION_COMMENT, GENERIC_LABELS, TIERS,
+                     JevError, build_questions, build_state, call_jev,
+                     decide, layer1, plan_labels)
 
 GH_API = "https://api.github.com"
 MARKER_RE = re.compile(r"<!-- jev-tag:v1 (\{.*?\}) -->", re.DOTALL)
@@ -62,6 +63,7 @@ class Gh:
         req = urllib.request.Request(url, data=data, headers=headers,
                                      method=method)
         try:
+            # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected -- req targets the hardcoded https GH_API constant; only the API path suffix varies
             with urllib.request.urlopen(req, timeout=30) as resp:
                 text = resp.read().decode("utf-8", "ignore")
                 return json.loads(text) if text else {}
@@ -149,6 +151,20 @@ def fetch_bundle(gh, repo, pr_number, workdir):
                 bundle[key] = fh.read()
         except OSError:
             bundle[key] = ""
+    # The repo's live label list, fetched ONCE per run: it feeds the
+    # Jev prompt (specialty picks may only come from it), decide()'s
+    # specialty intersection, and the apply-side label guard. A failed
+    # fetch is fail-open: repo_labels stays None and every consumer
+    # falls back to the generic v4.2 set with no guard filtering.
+    bundle["repo_labels"] = None
+    try:
+        raw_labels = gh.get_all(f"/repos/{repo}/labels")
+        bundle["repo_labels"] = [
+            {"name": lab.get("name") or "",
+             "description": lab.get("description") or ""}
+            for lab in raw_labels if lab.get("name")]
+    except GhError as exc:
+        warn(f"label list fetch failed (fail-open): {exc}")
     return bundle
 
 
@@ -172,31 +188,187 @@ def find_marker(comments):
                   "runs": 0}
 
 
-def marker_body(state, d, adds_pr, adds_issue, codex_now):
-    lines = ["**Jev tagging (pilot)**"]
-    applied = adds_pr + ([f"issue: {x}" for x in adds_issue])
-    if applied:
-        lines.append("Labels added: " + ", ".join(f"`{x}`" for x in applied))
+BAND_DOTS = {"high": "🔴", "mid": "🟡", "low": "🟢"}
+
+
+def marker_body(state, d, adds_pr, adds_issue, codex_now,
+                issue_number=None, skipped=None):
+    """The sticky status comment: compact and scannable (a reviewer
+    should read it in ~5 seconds). The machine state stays hidden in
+    the HTML-comment marker; nothing raw is rendered."""
+    band = d.get("security_band") or "unknown"
+    lines = [f"{BAND_DOTS.get(band, '⚪')} **Jev tagging (pilot)**"]
+    if adds_pr:
+        lines.append("**PR labels:** "
+                     + ", ".join(f"`{x}`" for x in adds_pr))
     else:
-        lines.append("Labels: no changes (already labelled or vetoed)")
-    band = d["security_band"]
+        lines.append("**PR labels:** no changes")
+    if issue_number:
+        if adds_issue:
+            lines.append(f"**Issue #{issue_number} labels:** "
+                         + ", ".join(f"`{x}`" for x in adds_issue))
+        else:
+            lines.append(f"**Issue #{issue_number} labels:** no changes")
+    else:
+        lines.append("🔗 No linked issue found, so labels were "
+                     "applied to the PR only")
     p = d.get("p_security_jev")
-    ptxt = f"P(security) {p:.2f}" if isinstance(p, (int, float)) else "Jev unavailable"
-    lines.append(f"Security band: **{band}** ({ptxt})")
-    if d["layer1"]["any"]:
-        hits = ", ".join(
-            h["match"] for h in d["layer1"]["hits"][:3])
-        lines.append(f"Layer 1 rule hits: {hits}")
+    ptxt = f"{p:.2f}" if isinstance(p, (int, float)) else "n/a"
+    blast = d.get("blast_radius")
+    sec = (f"🔒 Security: band **{band}** · P {ptxt} · "
+           f"blast {blast if blast is not None else '—'}")
+    cat = d.get("security_category")
+    if cat and cat != "none":
+        sec += f" · area: {cat}"
+    l1 = d.get("layer1") or {}
+    if l1.get("any"):
+        hits = ", ".join(_code_span(h["match"])
+                         for h in l1["hits"][:2])
+        sec += f" · rule hits: {hits}"
     if codex_now:
-        lines.append("Codex security review: requested on this run")
+        sec += " · Codex review **requested**"
     elif d.get("codex_posted_before"):
-        lines.append("Codex security review: already requested")
-    elif d["codex_post"]:
-        lines.append("Codex security review: due, already present")
-    else:
-        lines.append("Codex security review: not triggered")
+        sec += " · Codex review already requested"
+    elif d.get("codex_post"):
+        sec += " · Codex review due (already present)"
+    lines.append(sec)
+    themes = d.get("themes") or []
+    eff = d.get("effort")
+    lines.append("🏷️ Themes: "
+                 + (", ".join(themes) if themes else "—")
+                 + f" · Effort: {eff or '—'}")
+    if d.get("perf_flag"):
+        pp = d.get("p_perf_risk")
+        lines.append(f"⚡ Perf risk flagged (P {pp:.2f}): possible "
+                     "speed impact, worth a second look")
+    if d.get("issue_ready_low"):
+        rp = d.get("p_issue_ready")
+        lines.append(f"🧩 Linked issue may be underspecified "
+                     f"(readiness P {rp:.2f})")
+    if d.get("user_impact") in ("visible", "behavior-changing"):
+        ui_line = f"👀 User impact: **{d['user_impact']}**"
+        if d.get("user_facing_label"):
+            ui_line += f" · label `{d['user_facing_label']}` applied"
+        else:
+            ui_line += " · no user-facing label in this repo"
+        lines.append(ui_line)
+    notes = list(skipped or [])
+    esc = d.get("escalation") or {}
+    if esc.get("would_fire"):
+        # Deliberately NOT phrased as a mention: the note itself must
+        # never trigger the workflow it describes.
+        notes.append("deep-review escalation would fire "
+                     "(record-only, not posted)")
+    if notes:
+        shown = notes[:4]
+        if len(notes) > 4:
+            shown.append(f"+{len(notes) - 4} more")
+        lines.append("<sub>Skipped/notes: " + "; ".join(shown)
+                     + "</sub>")
     payload = json.dumps(state, separators=(",", ":"), sort_keys=True)
-    return f"<!-- jev-tag:v1 {payload} -->\n" + " · ".join(lines)
+    return f"<!-- jev-tag:v1 {payload} -->\n" + "\n".join(lines)
+
+
+# ------------------------------------------------------- Presentation
+
+# Deterministic matcher for a repo's user-facing label (must exist in
+# the live list; never invented). Names match the full pattern;
+# descriptions match only explicit phrases, so a stray "UI" in an
+# area label's description cannot hijack the pick.
+USER_FACING_NAME_RE = re.compile(
+    r"user[- ]?facing|customer[- ]?facing|end[- ]?user|front[- ]?end"
+    r"|\bux\b|\bui\b", re.IGNORECASE)
+USER_FACING_DESC_RE = re.compile(
+    r"user[- ]?facing|customer[- ]?facing|end[- ]?user", re.IGNORECASE)
+
+
+def match_user_facing_label(repo_labels):
+    """The repo's user-facing label name from its live label list, or
+    None. Specialty (non-generic) labels win over generic ones; ties
+    break alphabetically so the pick is deterministic."""
+    if not isinstance(repo_labels, list):
+        return None
+    matches = []
+    for item in repo_labels:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name") or ""
+        desc = item.get("description") or ""
+        if name and (USER_FACING_NAME_RE.search(name)
+                     or USER_FACING_DESC_RE.search(desc)):
+            matches.append(name)
+    if not matches:
+        return None
+    matches.sort(key=lambda n: (n in GENERIC_LABELS, n))
+    return matches[0]
+
+
+def _code_span(text):
+    """Render an author-controlled string (a file path or area name)
+    as an inline code span in a bot-posted comment: code spans
+    suppress @mentions and markdown, so a crafted path cannot fire
+    a mention or inject markup (Kody security finding on PR 26).
+    Backticks and newlines inside the value are neutralized so the
+    span cannot be broken out of."""
+    return "`" + text.replace("`", "'").replace("\r", " ") \
+        .replace("\n", " ") + "`"
+
+
+def codex_focus(d):
+    """Codex trigger comment body: the exact trigger string verbatim
+    on line 1 (so the mention parses as the review request, not a
+    free-form task), then Jev's specific concerns in the SAME comment
+    (owner correction 2026-10-28: less auto, more specific)."""
+    lines = ["@codex security review", "",
+             "Jev context for this review:"]
+    band = d.get("security_band") or "unknown"
+    p = d.get("p_security_jev")
+    ptxt = f"{p:.2f}" if isinstance(p, (int, float)) else "n/a"
+    sec = f"- Security: band {band}, P {ptxt}"
+    blast = d.get("blast_radius")
+    if blast is not None:
+        sec += f", blast radius {blast} of 5"
+    cat = d.get("security_category")
+    if cat and cat != "none":
+        sec += f", area: {cat}"
+    lines.append(sec)
+    files = []
+    for h in (d.get("layer1") or {}).get("hits") or []:
+        if h.get("kind") == "path" and h.get("match") not in files:
+            files.append(h["match"])
+    if files:
+        lines.append("- Files of concern: "
+                     + ", ".join(_code_span(f) for f in files[:5]))
+    elif d.get("top_areas"):
+        lines.append("- Areas of concern: "
+                     + ", ".join(_code_span(a)
+                                 for a in d["top_areas"]))
+    if d.get("perf_flag"):
+        lines.append("- Performance risk also flagged by Jev")
+    return "\n".join(lines)
+
+
+def escalation_comment(d):
+    """The would-be deep-review comment text (record-only mode: built
+    and logged, never posted). Review-only instruction first, then
+    Jev's specific concerns as the reviewer's focus list."""
+    concerns = []
+    cat = d.get("security_category")
+    if cat and cat != "none":
+        concerns.append(f"security area: {cat}")
+    if d.get("perf_flag"):
+        concerns.append("performance risk flagged by Jev")
+    if d.get("blast_radius") is not None:
+        concerns.append(f"blast radius {d['blast_radius']} of 5")
+    if d.get("top_areas"):
+        concerns.append("affected areas: "
+                        + ", ".join(_code_span(a)
+                                    for a in d["top_areas"]))
+    if d.get("themes"):
+        concerns.append("themes: " + ", ".join(d["themes"]))
+    focus = (" Focus on: " + "; ".join(concerns) + "."
+             if concerns else "")
+    return ESCALATION_COMMENT + focus
 
 
 def apply_decision(gh, bundle, d, comments=None):
@@ -208,7 +380,8 @@ def apply_decision(gh, bundle, d, comments=None):
     repo = bundle["repo"]
     pr_no = bundle["pr_number"]
     out = {"pr_added": [], "issue_added": [], "vetoed_pr": [],
-           "vetoed_issue": [], "codex_posted_now": False,
+           "vetoed_issue": [], "missing_pr": [], "missing_issue": [],
+           "labels_guard": "off", "codex_posted_now": False,
            "errors": []}
     if comments is False:
         # Vetoes and the Codex dedupe depend on the real comment
@@ -231,9 +404,34 @@ def apply_decision(gh, bundle, d, comments=None):
     state.setdefault("codex_posted", False)
     state.setdefault("runs", 0)
 
+    # Repo label guard: the repo's live label list (fetched once in
+    # fetch_bundle) filters the DESIRED set before planning, so a
+    # label the repo lacks can neither be applied nor consume a
+    # schema cap slot. Missing labels are footnoted, never an error.
+    # Fail-open: no list (fetch failed, or an empty list, which no
+    # real fleet repo has) means no filtering, as before the guard.
+    live_labels = bundle.get("repo_labels")
+    live_names = None
+    if isinstance(live_labels, list) and live_labels:
+        live_names = {lab.get("name") for lab in live_labels
+                      if isinstance(lab, dict) and lab.get("name")}
+    desired_pr = list(d["labels_desired"])
+    desired_issue = desired_pr + list(d.get("issue_extra_labels")
+                                      or [])
+    if live_names:
+        out["labels_guard"] = "on"
+        out["missing_pr"] = [x for x in desired_pr
+                             if x not in live_names]
+        out["missing_issue"] = [x for x in desired_issue
+                                if x not in live_names]
+        desired_pr = [x for x in desired_pr if x in live_names]
+        desired_issue = [x for x in desired_issue if x in live_names]
+
     vetoed_pr = sorted(set(state["pr_applied"]) - set(bundle["pr_labels"]))
     out["vetoed_pr"] = vetoed_pr
-    adds_pr = plan_labels(d["labels_desired"], bundle["pr_labels"],
+    out["missing_pr"] = [x for x in out["missing_pr"]
+                         if x not in vetoed_pr]
+    adds_pr = plan_labels(desired_pr, bundle["pr_labels"],
                           set(vetoed_pr))
     issue = bundle["issue"]
     adds_issue, vetoed_issue = [], []
@@ -246,7 +444,12 @@ def apply_decision(gh, bundle, d, comments=None):
             state["issue_number"] = issue["number"]
         vetoed_issue = sorted(set(state["issue_applied"]) - set(issue["labels"]))
         out["vetoed_issue"] = vetoed_issue
-        adds_issue = plan_labels(d["labels_desired"], issue["labels"],
+        out["missing_issue"] = [x for x in out["missing_issue"]
+                                if x not in vetoed_issue]
+        # Issue-only extras (e.g. the performance theme when Jev
+        # flags a perf risk) ride along in desired_issue; plan_labels
+        # still enforces the schema caps.
+        adds_issue = plan_labels(desired_issue, issue["labels"],
                                  set(vetoed_issue))
 
     def add_labels(number, labels):
@@ -295,8 +498,10 @@ def apply_decision(gh, bundle, d, comments=None):
     codex_now = False
     if d["codex_post"] and not d["codex_posted_before"]:
         try:
+            # Trigger string verbatim on line 1; Jev's specific focus
+            # follows in the same comment (codex_focus).
             gh.call("POST", f"/repos/{repo}/issues/{pr_no}/comments",
-                    {"body": "@codex security review"})
+                    {"body": codex_focus(d)})
             codex_now = True
         except GhError as exc:
             out["errors"].append(f"codex comment: {exc}")
@@ -305,12 +510,36 @@ def apply_decision(gh, bundle, d, comments=None):
     state["pr_applied"] = sorted(set(state["pr_applied"]) | set(applied_pr))
     state["issue_applied"] = sorted(set(state["issue_applied"]) | set(applied_issue))
     state["codex_posted"] = bool(state["codex_posted"] or codex_now)
+    state.setdefault("escalation_noted", False)
+    if (d.get("escalation") or {}).get("would_fire"):
+        state["escalation_noted"] = True
     state["runs"] = int(state.get("runs") or 0) + 1
-    body = marker_body(state, d, applied_pr, applied_issue, codex_now)
+    skipped = (
+        [f"`{x}` removed by a human earlier, not re-added"
+         for x in out["vetoed_pr"]]
+        + [f"`{x}` (issue) removed by a human earlier, not re-added"
+           for x in out["vetoed_issue"]]
+        + [f"`{x}` is not a label in this repo"
+           for x in out["missing_pr"]]
+        + [f"`{x}` (issue) is not a label in this repo"
+           for x in out["missing_issue"]])
+    body = marker_body(state, d, applied_pr, applied_issue, codex_now,
+                       issue_number=(issue or {}).get("number"),
+                       skipped=skipped)
+    # A first marker also posts when nothing was applied but the run
+    # has something a reviewer must see (perf/readiness/impact flags,
+    # skipped labels, a would-fire escalation); otherwise those
+    # warnings would stay invisible until some later label change.
+    show_worthy = bool(
+        applied_pr or applied_issue or codex_now
+        or out["missing_pr"] or out["missing_issue"]
+        or d.get("perf_flag") or d.get("issue_ready_low")
+        or d.get("user_impact") in ("visible", "behavior-changing")
+        or (d.get("escalation") or {}).get("would_fire"))
     try:
         if marker_comment:
             gh.call("PATCH", f"/repos/{repo}/issues/comments/{marker_comment['id']}", {"body": body})
-        elif applied_pr or applied_issue or codex_now:
+        elif show_worthy:
             gh.call("POST", f"/repos/{repo}/issues/{pr_no}/comments",
                     {"body": body})
     except GhError as exc:
@@ -334,6 +563,8 @@ def run(repo, pr_number, mode, workdir):
         record["error"] = f"gather failed: {exc}"
         warn(record["error"])
         return record
+    bundle["user_facing_label"] = match_user_facing_label(
+        bundle.get("repo_labels"))
     l1 = layer1(bundle)
     state = build_state(bundle, l1)
     record["state_bytes"] = len(state.encode("utf-8"))
@@ -343,7 +574,8 @@ def run(repo, pr_number, mode, workdir):
     record["files_truncated"] = bool(bundle.get("files_truncated"))
     jev = None
     try:
-        jev = call_jev(state, os.environ.get("OPENROUTER_API_KEY"))
+        jev = call_jev(state, os.environ.get("OPENROUTER_API_KEY"),
+                       questions=build_questions(bundle))
     except JevError as exc:
         record["jev_error"] = str(exc)
         warn(str(exc))
@@ -361,6 +593,8 @@ def run(repo, pr_number, mode, workdir):
             record["comments_error"] = str(exc)
             warn(f"comments fetch failed: {exc}")
     d = decide(bundle, l1, jev, prior=prior)
+    if (d.get("escalation") or {}).get("would_fire"):
+        d["escalation"]["comment"] = escalation_comment(d)
     record["decision"] = d
     if mode == "apply":
         record["applied"] = apply_decision(gh, bundle, d,
