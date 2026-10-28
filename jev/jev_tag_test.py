@@ -128,6 +128,22 @@ def self_test():
                                  "additions": 5, "deletions": 1}],
                       "pr_title": "t", "pr_body": "",
                       "issue": None})["any"])
+    check("layer1 dotted compound stem hits",
+          "auth" in layer1({"files": [{"path": "src/auth.service.ts",
+                                       "additions": 5,
+                                       "deletions": 1}],
+                            "pr_title": "t", "pr_body": "",
+                            "issue": None})["categories"]
+          and "payments" in layer1(
+              {"files": [{"path": "lib/payments.service.ts",
+                          "additions": 5, "deletions": 1}],
+               "pr_title": "t", "pr_body": "", "issue": None}
+          )["categories"])
+    check("layer1 dotted stem still whole word",
+          not layer1({"files": [{"path": "src/keyboard.config.ts",
+                                 "additions": 5, "deletions": 1}],
+                      "pr_title": "t", "pr_body": "",
+                      "issue": None})["any"])
     check("layer1 keyword scan gone",
           not layer1({"files": [{"path": "src/page.tsx",
                                  "additions": 3, "deletions": 1}],

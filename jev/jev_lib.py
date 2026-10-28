@@ -39,7 +39,9 @@ STATE_BUDGET = 27000          # bytes; Jev long-context mode starts ~32k
 # new-questions iteration plus the warrant gate and the paths-only
 # Layer 1 (keyword evidence deleted). Decision behavior changed
 # materially, so runs across this boundary are not comparable.
-VERSION = "2.0.0"
+# v2.0.1 = dotted compound stems (auth.service.ts) tokenize on dots
+# too, restoring their Layer 1 evidence (Kody finding on PR #27).
+VERSION = "2.0.1"
 
 # Fleet label schema v4.2 generic set (53). Anything in a repo's live
 # label list NOT in this set counts as a repo specialty label.
@@ -166,7 +168,11 @@ def _path_categories(path):
         words.add(comp)
         words.update(re.split(r"[-_]", comp))
     if not design_token:
-        words.update(re.split(r"[-_]", stem))
+        # Dots split too: dotted compound stems (auth.service.ts,
+        # login.page.tsx) carry their category word as a whole
+        # dot-delimited segment. Whole-word semantics are kept:
+        # tokenizer.ts and keyboard.config.ts still never match.
+        words.update(re.split(r"[-_.]", stem))
     cats = set()
     crit = False
     if comps[:2] == [".github", "workflows"]:

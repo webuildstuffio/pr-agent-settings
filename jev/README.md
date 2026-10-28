@@ -56,10 +56,11 @@ python3 /tmp/jev_tag.py --repo "$GITHUB_REPOSITORY" --pr "$PR" \
 
 Edit the script here, merge, then bump the pinned SHA in each wired
 repo's `qodo-review.yml` to the new main commit. The step carries a
-version (`VERSION` in `jev_lib.py`, currently v2.0.0; the v1 to v2
+version (`VERSION` in `jev_lib.py`, currently v2.0.1; the v1 to v2
 jump marks the warrant gate plus the paths-only Layer 1, whose
-decisions are not comparable to v1 runs). Wirings stamp the version
-as a `# jev-tag v2.0.0` comment above the step and the sticky comment
+decisions are not comparable to v1 runs; v2.0.1 tokenizes dotted
+compound stems such as auth.service.ts). Wirings stamp the version
+as a `# jev-tag v2.0.1` comment above the step and the sticky comment
 footer shows it. Mode is controlled per repo by the `JEV_TAG_MODE`
 repository variable (`dry-run` or `apply`; default `apply` when
 unset). Python 3 standard library only.
