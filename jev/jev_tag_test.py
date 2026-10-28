@@ -567,6 +567,36 @@ def v2_tests():
     check("guard fail-open without the list",
           "area:ghost" in gh.label_posts.get(7, [])
           and out["labels_guard"] == "off")
+    cap_labels = [{"name": n, "description": ""} for n in
+                  ("P2", "type:feature", "infra", "performance")]
+    cap_bundle = {"repo": "o/r", "pr_number": 7, "pr_labels": [],
+                  "issue": {"number": 5, "title": "t", "body": "",
+                            "labels": []},
+                  "repo_labels": cap_labels}
+    d_cap = {"labels_desired": ["P2", "type:feature", "cost", "infra"],
+             "issue_extra_labels": ["performance"],
+             "codex_post": False, "security_band": "low",
+             "p_security_jev": 0.1,
+             "layer1": {"any": False, "hits": []}}
+    gh = FakeGh2()
+    out = apply_decision(gh, cap_bundle, dict(d_cap))
+    check("missing theme does not consume the theme cap",
+          "performance" in gh.label_posts.get(5, [])
+          and "infra" in gh.label_posts.get(5, [])
+          and out["missing_issue"] == ["cost"])
+    d_warn = {"labels_desired": ["P2"], "issue_extra_labels": [],
+              "codex_post": False, "security_band": "low",
+              "p_security_jev": 0.1, "perf_flag": True,
+              "p_perf_risk": 0.9,
+              "layer1": {"any": False, "hits": []}}
+    warn_bundle = {"repo": "o/r", "pr_number": 7,
+                   "pr_labels": ["P2"], "issue": None,
+                   "repo_labels": None}
+    gh = FakeGh2()
+    apply_decision(gh, warn_bundle, dict(d_warn))
+    check("warning-only first run still posts the comment",
+          any("Perf risk flagged" in (p.get("body") or "")
+              for p in gh.comment_posts))
     d_esc_apply = dict(d_apply, labels_desired=["P2"],
                        issue_extra_labels=[],
                        escalation={"mode": "record-only",

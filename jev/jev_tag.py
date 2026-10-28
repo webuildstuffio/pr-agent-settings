@@ -388,9 +388,34 @@ def apply_decision(gh, bundle, d, comments=None):
     state.setdefault("codex_posted", False)
     state.setdefault("runs", 0)
 
+    # Repo label guard: the repo's live label list (fetched once in
+    # fetch_bundle) filters the DESIRED set before planning, so a
+    # label the repo lacks can neither be applied nor consume a
+    # schema cap slot. Missing labels are footnoted, never an error.
+    # Fail-open: no list (fetch failed, or an empty list, which no
+    # real fleet repo has) means no filtering, as before the guard.
+    live_labels = bundle.get("repo_labels")
+    live_names = None
+    if isinstance(live_labels, list) and live_labels:
+        live_names = {lab.get("name") for lab in live_labels
+                      if isinstance(lab, dict) and lab.get("name")}
+    desired_pr = list(d["labels_desired"])
+    desired_issue = desired_pr + list(d.get("issue_extra_labels")
+                                      or [])
+    if live_names:
+        out["labels_guard"] = "on"
+        out["missing_pr"] = [x for x in desired_pr
+                             if x not in live_names]
+        out["missing_issue"] = [x for x in desired_issue
+                                if x not in live_names]
+        desired_pr = [x for x in desired_pr if x in live_names]
+        desired_issue = [x for x in desired_issue if x in live_names]
+
     vetoed_pr = sorted(set(state["pr_applied"]) - set(bundle["pr_labels"]))
     out["vetoed_pr"] = vetoed_pr
-    adds_pr = plan_labels(d["labels_desired"], bundle["pr_labels"],
+    out["missing_pr"] = [x for x in out["missing_pr"]
+                         if x not in vetoed_pr]
+    adds_pr = plan_labels(desired_pr, bundle["pr_labels"],
                           set(vetoed_pr))
     issue = bundle["issue"]
     adds_issue, vetoed_issue = [], []
@@ -403,30 +428,13 @@ def apply_decision(gh, bundle, d, comments=None):
             state["issue_number"] = issue["number"]
         vetoed_issue = sorted(set(state["issue_applied"]) - set(issue["labels"]))
         out["vetoed_issue"] = vetoed_issue
+        out["missing_issue"] = [x for x in out["missing_issue"]
+                                if x not in vetoed_issue]
         # Issue-only extras (e.g. the performance theme when Jev
-        # flags a perf risk) ride along with the shared desired set;
-        # plan_labels still enforces the schema caps.
-        adds_issue = plan_labels(
-            d["labels_desired"] + list(d.get("issue_extra_labels") or []),
-            issue["labels"], set(vetoed_issue))
-
-    # Repo label guard: intersect the apply set with the repo's live
-    # label list (fetched once in fetch_bundle). Labels the repo does
-    # not have are skipped and footnoted, never an error. Fail-open:
-    # no list (fetch failed, or an empty list, which no real fleet
-    # repo has) means no filtering, exactly as before the guard.
-    live_labels = bundle.get("repo_labels")
-    live_names = None
-    if isinstance(live_labels, list) and live_labels:
-        live_names = {lab.get("name") for lab in live_labels
-                      if isinstance(lab, dict) and lab.get("name")}
-    if live_names:
-        out["labels_guard"] = "on"
-        out["missing_pr"] = [x for x in adds_pr if x not in live_names]
-        out["missing_issue"] = [x for x in adds_issue
-                                if x not in live_names]
-        adds_pr = [x for x in adds_pr if x in live_names]
-        adds_issue = [x for x in adds_issue if x in live_names]
+        # flags a perf risk) ride along in desired_issue; plan_labels
+        # still enforces the schema caps.
+        adds_issue = plan_labels(desired_issue, issue["labels"],
+                                 set(vetoed_issue))
 
     def add_labels(number, labels):
         """POST labels; return only the labels actually applied, so a
@@ -502,10 +510,20 @@ def apply_decision(gh, bundle, d, comments=None):
     body = marker_body(state, d, applied_pr, applied_issue, codex_now,
                        issue_number=(issue or {}).get("number"),
                        skipped=skipped)
+    # A first marker also posts when nothing was applied but the run
+    # has something a reviewer must see (perf/readiness/impact flags,
+    # skipped labels, a would-fire escalation); otherwise those
+    # warnings would stay invisible until some later label change.
+    show_worthy = bool(
+        applied_pr or applied_issue or codex_now
+        or out["missing_pr"] or out["missing_issue"]
+        or d.get("perf_flag") or d.get("issue_ready_low")
+        or d.get("user_impact") in ("visible", "behavior-changing")
+        or (d.get("escalation") or {}).get("would_fire"))
     try:
         if marker_comment:
             gh.call("PATCH", f"/repos/{repo}/issues/comments/{marker_comment['id']}", {"body": body})
-        elif applied_pr or applied_issue or codex_now:
+        elif show_worthy:
             gh.call("POST", f"/repos/{repo}/issues/{pr_no}/comments",
                     {"body": body})
     except GhError as exc:
