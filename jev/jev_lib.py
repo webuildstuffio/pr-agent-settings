@@ -34,6 +34,48 @@ SEC_HIGH = 0.80               # P(security) high band
 SEC_MID = 0.40                # P(security) mid band
 STATE_BUDGET = 27000          # bytes; Jev long-context mode starts ~32k
 
+# Fleet label schema v4.2 generic set (53). Anything in a repo's live
+# label list NOT in this set counts as a repo specialty label.
+GENERIC_LABELS = set(
+    SCHEMA_PRIORITIES + ["type:" + t for t in SCHEMA_TYPES]
+    + ["status:paused", "status:delayed", "status:blocked",
+       "status:needs-info"] + SCHEMA_THEMES + SCHEMA_EFFORTS
+    + ["needs-triage", "claude-ready", "human-only", "regression",
+       "owner-decision", "owner-mustdo", "epic", "dependencies",
+       "github-actions", "bun", "monthly-update", "good first issue",
+       "help wanted", "invalid", "wontfix", "🤖 claude-working",
+       "✅ claude-complete", "❌ claude-failed"])
+SPECIALTY_MIN = 0.30          # min choice probability per specialty pick
+SPECIALTY_CAP = 2             # max specialty labels applied per PR
+
+# @claude deep-review escalation: RECORD-ONLY mode. The gate is
+# scored and logged (comment footer + run record) but NO comment is
+# posted: fleet claude workflows reject bot actors unless
+# allowed_bots is set (separate owner-gated template change). Live
+# mode must also enforce the daily budget (<=2/repo, ~6 fleet).
+ESCALATION_MODE = "record-only"
+ESCALATION_COMMENT = (
+    "@claude please do a deep review of this pull request. "
+    "Review only: post your findings as a PR review. "
+    "Do not push commits and do not open pull requests.")
+ESCALATION_MIN_LINES = 400    # gate: large diff by changed lines...
+ESCALATION_MIN_FILES = 15     # ...or by file count
+
+
+def repo_specialties(repo_labels):
+    """Specialty catalog {name: description} from a repo's live label
+    list, or {} when the list is unavailable or has no specialties."""
+    if not isinstance(repo_labels, list):
+        return {}
+    out = {}
+    for item in repo_labels:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if name and name not in GENERIC_LABELS:
+            out[name] = (item.get("description") or "").strip()
+    return out
+
 JEV_URL = "https://openrouter.ai/api/alpha/decisions"
 JEV_MODEL = os.environ.get("JEV_MODEL", "typesafe/jev-1.14")
 
@@ -242,7 +284,27 @@ QUESTIONS = {
         "type": "noul",
         "instructions": "This change is low risk to merge: it cannot break production behavior (docs, copy, tests, or trivially safe edits only).",
     },
+    "perf_risk": {
+        "type": "noul",
+        "instructions": "This change could degrade speed or responsiveness: slower or heavier queries or data access, larger bundle or payload, hot-path or render-path work, missing pagination or caching, or more computation per request.",
+    },
+    "user_impact": {
+        "type": "choice",
+        "instructions": "How does this change affect the product's users?",
+        "criteria": {
+            "invisible": "No user can see or feel any difference: internal refactor, tests, CI, or developer-only docs",
+            "visible": "Users can see a difference (interface, copy, layout, content) but behavior and contracts are unchanged",
+            "behavior-changing": "Behavior that users or API consumers rely on changes: flows, defaults, outputs, data, or permissions",
+        },
+    },
 }
+
+PERF_FLAG_MIN = 0.70          # P(perf risk) at/above this flags the PR
+ISSUE_READY_LOW_MAX = 0.40    # P(issue ready) below this flags the issue
+USER_IMPACT_MIN = 0.50        # min choice probability to act on impact
+# The user-facing matcher and the comment-text builders live in
+# jev_tag.py (presentation); decide() consumes the caller's
+# precomputed bundle["user_facing_label"] instead.
 
 
 class JevError(Exception):
@@ -277,15 +339,55 @@ def build_state(bundle, l1):
         parts.append("Repository README excerpt:\n" + trunc_bytes(bundle["readme"], 2500))
     if bundle["agents"]:
         parts.append("Repository AGENTS.md excerpt:\n" + trunc_bytes(bundle["agents"], 2500))
+    catalog = repo_specialties(bundle.get("repo_labels"))
+    if catalog:
+        # The FULL specialty list from the repo's live labels (the
+        # only specialty labels Jev may pick). Descriptions are
+        # dropped first if the section would crowd out the budget.
+        head = ("Repository specialty labels (repo-specific; the only "
+                "non-generic labels that exist in this repo):\n")
+        section = head + "\n".join(
+            f"- {n}: {d}" if d else f"- {n}"
+            for n, d in sorted(catalog.items()))
+        if len(section.encode("utf-8")) > 5000:
+            section = head + "\n".join(sorted(catalog))
+        parts.append(trunc_bytes(section, 5000))
     return trunc_bytes("\n\n".join(parts), STATE_BUDGET)
 
 
-def call_jev(state, api_key):
+def build_questions(bundle):
+    """The job sheet for this run: the fixed QUESTIONS, plus the
+    linked-issue readiness question when there is one, plus (when
+    the live label list has specialties) a dynamic choice question
+    whose criteria ARE those labels plus a none option."""
+    questions = dict(QUESTIONS)
+    if bundle.get("issue"):
+        questions["issue_ready"] = {
+            "type": "noul",
+            "instructions": "The linked issue is specified well enough for someone to act on without guessing: it states the problem or goal, the expected behavior or acceptance criteria, and enough context, scope, or reproduction detail.",
+        }
+    catalog = repo_specialties(bundle.get("repo_labels"))
+    if catalog:
+        criteria = {name: (desc or "Repo-specific label")
+                    for name, desc in sorted(catalog.items())}
+        criteria["none"] = "No repo specialty label fits this change"
+        questions["specialty_labels"] = {
+            "type": "choice",
+            "instructions": ("Which of this repository's specialty "
+                             "labels best fit this pull request? Pick "
+                             "from the listed labels only; pick none "
+                             "if no specialty label clearly applies."),
+            "criteria": criteria,
+        }
+    return questions
+
+
+def call_jev(state, api_key, questions=None):
     """One Decisions API request with the whole job sheet."""
     if not api_key:
         raise JevError("OPENROUTER_API_KEY is not set")
     payload = {"model": JEV_MODEL, "state": state,
-               "questions": QUESTIONS}
+               "questions": questions or QUESTIONS}
     req = urllib.request.Request(
         JEV_URL,
         data=json.dumps(payload).encode("utf-8"),
@@ -296,6 +398,7 @@ def call_jev(state, api_key):
         },
         method="POST")
     try:
+        # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected -- req targets the hardcoded https JEV_URL constant; only the JSON payload varies
         with urllib.request.urlopen(req, timeout=90) as resp:
             data = json.loads(resp.read().decode("utf-8", "ignore"))
     except urllib.error.HTTPError as exc:
@@ -483,9 +586,103 @@ def decide(bundle, l1, jev, prior=None):
     lr = answers.get("low_risk") or {}
     d["p_low_risk"] = lr.get("noul") if isinstance(lr, dict) else None
 
+    # --- specialty labels: picks come only from the repo's live
+    # list (the dynamic question's criteria); outside picks, or any
+    # pick when the list was never fetched, are dropped here, and
+    # the apply-side guard intersects again before posting.
+    specialty_picks = []
+    catalog = repo_specialties(bundle.get("repo_labels"))
+    if catalog:
+        spec_probs = ((answers.get("specialty_labels") or {})
+                      .get("probabilities") or {})
+        ranked = sorted(
+            ((name, float(p)) for name, p in spec_probs.items()
+             if name in catalog and isinstance(p, (int, float))),
+            key=lambda kv: -kv[1])
+        specialty_picks = [name for name, p in ranked
+                           if p >= SPECIALTY_MIN][:SPECIALTY_CAP]
+    d["specialty_labels"] = specialty_picks
+
+    # --- performance risk: high P flags the sticky comment and
+    # adds the performance theme as a candidate on the issue.
+    pr_perf = (answers.get("perf_risk") or {}).get("noul")
+    d["p_perf_risk"] = pr_perf if isinstance(pr_perf, (int, float)) else None
+    d["perf_flag"] = bool(d["p_perf_risk"] is not None
+                          and d["p_perf_risk"] >= PERF_FLAG_MIN)
+    d["issue_extra_labels"] = ["performance"] if d["perf_flag"] else []
+
+    # --- linked-issue readiness: low P flags the comment + record.
+    p_ready = (answers.get("issue_ready") or {}).get("noul")
+    d["p_issue_ready"] = (p_ready if isinstance(p_ready, (int, float))
+                          else None)
+    d["issue_ready_low"] = bool(
+        bundle.get("issue") and d["p_issue_ready"] is not None
+        and d["p_issue_ready"] < ISSUE_READY_LOW_MAX)
+
+    # --- user-facing impact, as a label: visible/behavior-changing
+    # applies the repo's own user-facing label (live list, specialty
+    # mechanism); no such label = comment line only, never invented.
+    ui, ui_p = top_choice(answers.get("user_impact"))
+    d["user_impact"] = (ui if ui in ("invisible", "visible",
+                                     "behavior-changing")
+                        and ui_p >= USER_IMPACT_MIN else None)
+    d["user_impact_p"] = ui_p
+    d["user_facing_label"] = None
+    if d["user_impact"] in ("visible", "behavior-changing"):
+        # The caller precomputed the repo's user-facing label from
+        # the live list; re-intersect here so a stale or forged
+        # bundle value can never invent a label.
+        cand = bundle.get("user_facing_label")
+        live = {lab.get("name") for lab in bundle.get("repo_labels")
+                or [] if isinstance(lab, dict)}
+        if cand and cand in live:
+            d["user_facing_label"] = cand
+
+    # --- affected areas (top path segments), for escalation focus
+    area_counts = {}
+    for f in bundle.get("files") or []:
+        seg = (f.get("path") or "").split("/", 1)[0]
+        if seg:
+            area_counts[seg] = area_counts.get(seg, 0) + 1
+    d["top_areas"] = [name for name, _ in sorted(
+        area_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:3]]
+
+    # --- @claude deep-review escalation gate (RECORD-ONLY: scored
+    # and logged, never posted; see the ESCALATION_* constants).
+    files = bundle.get("files") or []
+    diff_lines = sum((f.get("additions") or 0) + (f.get("deletions") or 0)
+                     for f in files)
+    cw_score = d["codex_worth_score"]
+    risk_level = (int(round(float(cw_score)))
+                  if isinstance(cw_score, (int, float)) else None)
+    esc_risk_ok = bool(
+        risk_level is not None
+        and (risk_level >= 4 or (risk_level == 3 and blast == 5)))
+    esc_size_ok = bool(diff_lines >= ESCALATION_MIN_LINES
+                       or len(files) >= ESCALATION_MIN_FILES)
+    esc_tier_ok = tier in ("flagship", "active")
+    esc_prior_ok = not (prior and prior.get("escalation_noted"))
+    escalation = {
+        "mode": ESCALATION_MODE,
+        "would_fire": bool(esc_risk_ok and esc_size_ok and esc_tier_ok
+                           and esc_prior_ok),
+        "risk_ok": esc_risk_ok, "size_ok": esc_size_ok,
+        "tier_ok": esc_tier_ok, "prior_ok": esc_prior_ok,
+        "risk_level": risk_level, "diff_lines": diff_lines,
+        "files_changed": len(files),
+        "budget": ("untracked in record-only mode (limits when live: "
+                   "<=2 per repo per day, ~6 fleet-wide)"),
+        "comment": None,
+    }
+    # The caller builds escalation["comment"] when the gate fires.
+    d["escalation"] = escalation
+
     desired = [d["priority"]] + [f"type:{t}" for t in types] + themes + d["owner_labels"]
     if d["effort"]:
         desired.append(d["effort"])
+    desired.extend(specialty_picks)
+    if d["user_facing_label"]:
+        desired.append(d["user_facing_label"])
     d["labels_desired"] = desired
     return d
 

@@ -10,9 +10,12 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from jev_lib import (STATE_BUDGET, build_state, clamp_priority,
-                     decide, layer1, plan_labels)
-from jev_tag import (Gh, GhError, apply_decision, find_marker,
+from jev_lib import (STATE_BUDGET, build_questions, build_state,
+                     clamp_priority, decide, layer1, plan_labels,
+                     repo_specialties)
+from jev_tag import (Gh, GhError, apply_decision, codex_focus,
+                     escalation_comment, find_marker,
+                     match_user_facing_label, marker_body,
                      parse_linked_issue)
 
 
@@ -285,7 +288,9 @@ def apply_tests():
     out = apply_decision(gh, bundle, dict(d_sec))
     check("codex boilerplate does not dedupe the trigger",
           out["codex_posted_now"] is True
-          and any(p.get("body") == "@codex security review"
+          and any((p.get("body") or "").splitlines()[0]
+                  == "@codex security review"
+                  and "band high" in p["body"]
                   for p in gh.comment_posts))
     human_mention = [{"user": {"login": "nichm"},
                       "body": "@codex security review"}]
@@ -297,5 +302,287 @@ def apply_tests():
     return 0 if ok else 1
 
 
+def v2_tests():
+    """Comment restyle, missing-issue flag, label guard, specialty
+    labels, perf/readiness questions, user-impact labels, Codex
+    focus text, and the record-only escalation gate."""
+    ok = True
+
+    def check(name, cond):
+        nonlocal ok
+        print(("PASS " if cond else "FAIL ") + name)
+        ok = ok and bool(cond)
+
+    plain = {"hits": [], "any": False, "critical": False,
+             "categories": [], "hard": False}
+    labels = [{"name": "P2", "description": ""},
+              {"name": "type:feature", "description": ""},
+              {"name": "area:dashboard", "description": "Dashboard UI"},
+              {"name": "area:worker", "description": "Worker code"},
+              {"name": "user-facing",
+               "description": "Touches what users see"}]
+
+    def mk_bundle(**over):
+        b = {"repo": "webuildstuffio/x", "pr_number": 3,
+             "pr_title": "t", "pr_body": "", "pr_author": "a",
+             "pr_labels": [], "files": [], "issue": None,
+             "tier": "flagship", "readme": "", "agents": "",
+             "repo_labels": None}
+        b.update(over)
+        return b
+
+    def mk_answers(**over):
+        a = {"security_related": {"type": "noul", "noul": 0.1},
+             "blast_radius": {"type": "score", "score": 1.0},
+             "change_type": {"type": "choice", "choice": "feature",
+                             "probabilities": {"feature": 0.9}},
+             "priority": {"type": "choice", "choice": "P2",
+                          "probabilities": {"P2": 0.8}},
+             "codex_worth": {"type": "score", "score": 1.0}}
+        a.update(over)
+        return {"answers": a}
+
+    # --- specialty labels
+    check("specialties exclude generics",
+          set(repo_specialties(labels)) == {"area:dashboard",
+                                            "area:worker",
+                                            "user-facing"})
+    check("specialties none when fetch failed",
+          repo_specialties(None) == {})
+    q = build_questions(mk_bundle(repo_labels=labels))
+    check("specialty question offered",
+          "specialty_labels" in q
+          and "area:dashboard" in q["specialty_labels"]["criteria"]
+          and "none" in q["specialty_labels"]["criteria"])
+    check("no specialty question without the list",
+          "specialty_labels" not in build_questions(mk_bundle()))
+    check("state lists specialty labels",
+          "area:dashboard" in build_state(
+              mk_bundle(repo_labels=labels), plain))
+    spec = mk_answers(specialty_labels={
+        "type": "choice", "choice": "area:dashboard",
+        "probabilities": {"area:ghost": 0.95, "area:dashboard": 0.8,
+                          "area:worker": 0.5, "user-facing": 0.4}})
+    d = decide(mk_bundle(repo_labels=labels), plain, spec)
+    check("specialty picks from the list only, capped at 2",
+          d["specialty_labels"] == ["area:dashboard", "area:worker"]
+          and "area:ghost" not in d["labels_desired"])
+    d = decide(mk_bundle(), plain, spec)
+    check("specialty picks dropped when list unfetched",
+          d["specialty_labels"] == [])
+    low_spec = mk_answers(specialty_labels={
+        "type": "choice", "choice": "area:dashboard",
+        "probabilities": {"area:dashboard": 0.2}})
+    check("specialty pick below threshold dropped",
+          decide(mk_bundle(repo_labels=labels), plain,
+                 low_spec)["specialty_labels"] == [])
+
+    # --- perf risk + issue readiness
+    d = decide(mk_bundle(), plain,
+               mk_answers(perf_risk={"type": "noul", "noul": 0.85}))
+    check("perf flag high", d["perf_flag"] is True
+          and d["issue_extra_labels"] == ["performance"])
+    d = decide(mk_bundle(), plain,
+               mk_answers(perf_risk={"type": "noul", "noul": 0.5}))
+    check("perf flag low", d["perf_flag"] is False
+          and d["issue_extra_labels"] == [])
+    issue = {"number": 55, "title": "i", "body": "b", "labels": []}
+    check("readiness question only with an issue",
+          "issue_ready" in build_questions(mk_bundle(issue=issue))
+          and "issue_ready" not in build_questions(mk_bundle()))
+    d = decide(mk_bundle(issue=issue), plain,
+               mk_answers(issue_ready={"type": "noul", "noul": 0.2}))
+    check("readiness low flagged", d["issue_ready_low"] is True
+          and d["p_issue_ready"] == 0.2)
+    d = decide(mk_bundle(), plain,
+               mk_answers(issue_ready={"type": "noul", "noul": 0.2}))
+    check("readiness ignored without an issue",
+          d["issue_ready_low"] is False)
+
+    # --- user-facing impact as a label
+    check("user-facing matcher finds the specialty label",
+          match_user_facing_label(labels) == "user-facing")
+    check("user-facing matcher none without a match",
+          match_user_facing_label(
+              [{"name": "area:x", "description": ""}]) is None)
+    check("user-facing matcher fail-open on no list",
+          match_user_facing_label(None) is None)
+    d = decide(mk_bundle(repo_labels=labels,
+                         user_facing_label="user-facing"),
+               plain, mk_answers(
+                   user_impact={"type": "choice", "choice": "visible",
+                                "probabilities": {"visible": 0.8}}))
+    check("visible impact applies the repo label",
+          d["user_impact"] == "visible"
+          and d["user_facing_label"] == "user-facing"
+          and "user-facing" in d["labels_desired"])
+    d = decide(mk_bundle(repo_labels=labels,
+                         user_facing_label="area:ghost"),
+               plain, mk_answers(
+                   user_impact={"type": "choice", "choice": "visible",
+                                "probabilities": {"visible": 0.8}}))
+    check("user-facing candidate outside the live list dropped",
+          d["user_facing_label"] is None)
+    d = decide(mk_bundle(repo_labels=labels), plain, mk_answers(
+        user_impact={"type": "choice", "choice": "invisible",
+                     "probabilities": {"invisible": 0.9}}))
+    check("invisible impact no label",
+          d["user_impact"] == "invisible"
+          and d["user_facing_label"] is None)
+    d = decide(mk_bundle(repo_labels=labels), plain, mk_answers(
+        user_impact={"type": "choice", "choice": "visible",
+                     "probabilities": {"visible": 0.3}}))
+    check("weak impact ignored", d["user_impact"] is None)
+
+    # --- escalation gate (record-only)
+    big = [{"path": "src/a.ts", "additions": 300, "deletions": 150}]
+    d = decide(mk_bundle(files=big), plain, mk_answers(
+        codex_worth={"type": "score", "score": 4.0},
+        blast_radius={"type": "score", "score": 4.2}))
+    esc_text = escalation_comment(d)
+    check("escalation fires at the high bar",
+          d["escalation"]["would_fire"] is True
+          and d["escalation"]["mode"] == "record-only"
+          and "Review only" in esc_text
+          and "blast radius 5 of 5" in esc_text
+          and "src" in esc_text)
+    d = decide(mk_bundle(files=big, tier="active"), plain, mk_answers(
+        codex_worth={"type": "score", "score": 3.0},
+        blast_radius={"type": "score", "score": 4.2}))
+    check("escalation 3-of-4 plus blast 5 fires",
+          d["escalation"]["would_fire"] is True)
+    d = decide(mk_bundle(files=big), plain, mk_answers(
+        codex_worth={"type": "score", "score": 3.0},
+        blast_radius={"type": "score", "score": 3.4}))
+    check("escalation 3-of-4 without blast 5 held",
+          d["escalation"]["would_fire"] is False)
+    d = decide(mk_bundle(), plain, mk_answers(
+        codex_worth={"type": "score", "score": 4.0}))
+    check("escalation small diff held",
+          d["escalation"]["would_fire"] is False)
+    d = decide(mk_bundle(files=big, tier="casual"), plain, mk_answers(
+        codex_worth={"type": "score", "score": 4.0}))
+    check("escalation casual tier held",
+          d["escalation"]["would_fire"] is False)
+    d = decide(mk_bundle(files=big), plain, mk_answers(
+        codex_worth={"type": "score", "score": 4.0}),
+        prior={"escalation_noted": True})
+    check("escalation prior note held",
+          d["escalation"]["would_fire"] is False)
+
+    # --- Codex focus text
+    l1_auth = layer1({"files": [{"path": "src/auth/login.ts",
+                                 "additions": 5, "deletions": 1}],
+                      "pr_title": "t", "pr_body": "", "issue": None})
+    d = decide(mk_bundle(), l1_auth, mk_answers(
+        security_related={"type": "noul", "noul": 0.93},
+        security_category={"type": "choice", "choice": "auth",
+                           "probabilities": {"auth": 0.9}},
+        blast_radius={"type": "score", "score": 3.4},
+        perf_risk={"type": "noul", "noul": 0.8}))
+    body = codex_focus(d)
+    check("codex focus trigger verbatim on line 1",
+          body.splitlines()[0] == "@codex security review")
+    check("codex focus carries the specifics",
+          "area: auth" in body and "P 0.93" in body
+          and "blast radius 4 of 5" in body
+          and "src/auth/login.ts" in body
+          and "Performance risk" in body)
+
+    # --- marker body restyle
+    state = {"pr_applied": [], "issue_applied": [],
+             "issue_number": None, "codex_posted": False, "runs": 1}
+    d = decide(mk_bundle(), plain, mk_answers())
+    body = marker_body(state, d, ["P2", "type:feature"], [], False)
+    visible = body.split("-->", 1)[1]
+    check("restyle verdict dot + bold PR labels",
+          "🟢 **Jev tagging (pilot)**" in body
+          and "**PR labels:**" in body and "`type:feature`" in body)
+    check("restyle missing-issue flag visible",
+          "No linked issue found" in body)
+    check("restyle hides the raw marker JSON",
+          '"pr_applied"' not in visible and "{" not in visible)
+    body = marker_body(state, d, [], ["P2"], False, issue_number=55)
+    check("restyle issue labels line, no flag",
+          "**Issue #55 labels:**" in body
+          and "No linked issue found" not in body)
+    d_sec = decide(mk_bundle(), l1_auth, mk_answers(
+        security_related={"type": "noul", "noul": 0.93}))
+    body = marker_body(state, d_sec, ["P1"], [], True)
+    check("restyle high band red dot + codex requested",
+          body.startswith("<!--") and "🔴" in body.split("-->", 1)[1]
+          and "Codex review **requested**" in body)
+    body = marker_body(state, d, [], [], False,
+                       skipped=["`area:ghost` is not a label in "
+                                "this repo"])
+    check("restyle footer notes skips",
+          "<sub>" in body and "not a label in this repo" in body)
+    d_flags = decide(mk_bundle(issue=issue), plain, mk_answers(
+        perf_risk={"type": "noul", "noul": 0.9},
+        issue_ready={"type": "noul", "noul": 0.1},
+        user_impact={"type": "choice", "choice": "visible",
+                     "probabilities": {"visible": 0.9}}))
+    body = marker_body(state, d_flags, [], [], False, issue_number=55)
+    check("restyle perf + readiness + impact lines",
+          "Perf risk flagged" in body and "underspecified" in body
+          and "User impact: **visible**" in body
+          and "no user-facing label in this repo" in body)
+    d_esc = decide(mk_bundle(files=big), plain, mk_answers(
+        codex_worth={"type": "score", "score": 4.0}))
+    body = marker_body(state, d_esc, [], [], False)
+    check("restyle escalation footer note, no mention string",
+          "would fire" in body and "@claude" not in body)
+
+    # --- apply-level: guard, issue extras, escalation persistence
+    bundle = {"repo": "o/r", "pr_number": 7, "pr_labels": [],
+              "issue": {"number": 5, "title": "t", "body": "",
+                        "labels": []},
+              "repo_labels": labels}
+    d_apply = {"labels_desired": ["P2", "area:dashboard", "area:ghost"],
+               "issue_extra_labels": ["performance"],
+               "codex_post": False, "security_band": "low",
+               "p_security_jev": 0.1,
+               "layer1": {"any": False, "hits": []}}
+    gh = FakeGh2()
+    out = apply_decision(gh, bundle, dict(d_apply))
+    check("guard drops labels the repo lacks",
+          "area:ghost" not in gh.label_posts.get(7, [])
+          and out["missing_pr"] == ["area:ghost"]
+          and out["labels_guard"] == "on")
+    check("guard keeps real labels, perf theme issue-only",
+          "area:dashboard" in gh.label_posts.get(7, [])
+          and "performance" not in gh.label_posts.get(7, []))
+    check("issue side filtered but no perf (not a repo label)",
+          "performance" not in gh.label_posts.get(5, []))
+    bundle_perf = dict(bundle, repo_labels=labels + [
+        {"name": "performance", "description": ""}])
+    gh = FakeGh2()
+    apply_decision(gh, bundle_perf, dict(d_apply))
+    check("perf theme lands on the issue when it exists there",
+          "performance" in gh.label_posts.get(5, [])
+          and "performance" not in gh.label_posts.get(7, []))
+    gh = FakeGh2()
+    out = apply_decision(gh, dict(bundle, repo_labels=None),
+                         dict(d_apply))
+    check("guard fail-open without the list",
+          "area:ghost" in gh.label_posts.get(7, [])
+          and out["labels_guard"] == "off")
+    d_esc_apply = dict(d_apply, labels_desired=["P2"],
+                       issue_extra_labels=[],
+                       escalation={"mode": "record-only",
+                                   "would_fire": True})
+    gh = FakeGh2()
+    apply_decision(gh, bundle, d_esc_apply)
+    marker_posts = [p for p in gh.comment_posts
+                    if "jev-tag:v1" in (p.get("body") or "")]
+    saved = json.loads(marker_posts[0]["body"].split(
+        "<!-- jev-tag:v1 ", 1)[1].split(" -->", 1)[0])
+    check("escalation noted persisted in marker state",
+          saved.get("escalation_noted") is True
+          and "@claude" not in json.dumps(gh.comment_posts))
+    print("V2-TEST " + ("OK" if ok else "FAILED"))
+    return 0 if ok else 1
+
+
 if __name__ == "__main__":
-    sys.exit(1 if (self_test() or apply_tests()) else 0)
+    sys.exit(1 if (self_test() or apply_tests() or v2_tests()) else 0)
