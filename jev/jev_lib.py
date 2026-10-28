@@ -119,6 +119,11 @@ def layer1(bundle):
         "hits": uniq[:40],
         "any": len(uniq) > 0,
         "critical": any(h["critical"] for h in uniq),
+        # A "hard" hit: any path hit, or a critical keyword hit. Soft
+        # keyword hits alone (e.g. the word "token" in prose) still
+        # count as security for labels, but never trigger a Codex
+        # security review post on their own.
+        "hard": any(h["kind"] == "path" or h["critical"] for h in uniq),
         "categories": sorted({h["category"] for h in uniq}),
     }
 
@@ -385,11 +390,13 @@ def decide(bundle, l1, jev, prior=None):
     if isinstance(answers.get("secrets_in_text"), dict):
         secrets_txt = answers["secrets_in_text"].get("noul")
     d["p_secrets_in_text"] = secrets_txt
-    if l1["any"] or human_sec:
+    l1_hard = bool(l1.get("hard"))
+    d["layer1_hard"] = l1_hard
+    if l1_hard or human_sec:
         band = "high"
     elif p_sec is not None and p_sec >= SEC_HIGH:
         band = "high"
-    elif p_sec is not None and p_sec >= SEC_MID:
+    elif l1["any"] or (p_sec is not None and p_sec >= SEC_MID):
         band = "mid"
     elif secrets_txt is not None and secrets_txt >= SEC_HIGH:
         band = "mid"
@@ -400,7 +407,18 @@ def decide(bundle, l1, jev, prior=None):
     d["security_band"] = band
     cat, _ = top_choice(answers.get("security_category"))
     d["security_category"] = cat if cat in SEC_CATEGORIES else None
-    codex_post = band == "high" or (band == "mid" and blast is not None and blast >= 4)
+    # The Codex post fires on a HARD Layer 1 hit or a high Jev
+    # probability (the spec's post rule), or on the spec's mid-band
+    # blast upgrade: Jev probability in the mid range with blast
+    # radius >= 4, whatever else set the band. Soft keyword hits
+    # and the human-label floor raise the band for labels, but do
+    # not post on their own, and the floor must never suppress an
+    # escalation Jev's own signals earned.
+    codex_post = (
+        l1_hard
+        or (p_sec is not None and p_sec >= SEC_HIGH)
+        or (p_sec is not None and p_sec >= SEC_MID
+            and blast is not None and blast >= 4))
     d["codex_post"] = bool(codex_post)
 
     # --- types (1-3)
