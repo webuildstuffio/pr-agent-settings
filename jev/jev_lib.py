@@ -333,8 +333,12 @@ def clamp_priority(raw_idx, tier, l1, band):
     return min(max(idx, 0), 4)
 
 
-def decide(bundle, l1, jev):
-    """Combine Layer 1 + Jev answers into a label decision record."""
+def decide(bundle, l1, jev, prior=None):
+    """Combine Layer 1 + Jev answers into a label decision record.
+
+    `prior` is the step's own persisted marker state (apply mode): a
+    type:security label the step itself applied earlier is in it, and
+    must not be mistaken for a human security floor on re-runs."""
     answers = (jev or {}).get("answers") or {}
     tier = bundle["tier"]
     d = {
@@ -350,9 +354,22 @@ def decide(bundle, l1, jev):
     # A human-applied type:security on the PR or its linked issue is a
     # deterministic security floor: Jev must never downgrade it, so it
     # bands like a Layer 1 hit even when Jev is low or unavailable.
-    human_sec = "type:security" in bundle["pr_labels"] or bool(
-        bundle["issue"]
-        and "type:security" in bundle["issue"]["labels"])
+    # Labels the step itself applied (in `prior`) do not count, or a
+    # mid-band self-application would self-escalate on the next run.
+    def self_applied(scope):
+        if not prior:
+            return set()
+        return set(prior.get(scope) or [])
+
+    human_sec = (
+        "type:security" in bundle["pr_labels"]
+        and "type:security" not in self_applied("pr_applied"))
+    if bundle["issue"] and "type:security" in bundle["issue"]["labels"]:
+        same_issue = prior and prior.get("issue_number") == \
+            bundle["issue"]["number"]
+        if not (same_issue
+                and "type:security" in self_applied("issue_applied")):
+            human_sec = True
     d["human_security_label"] = human_sec
     p_sec = None
     if isinstance(answers.get("security_related"), dict):

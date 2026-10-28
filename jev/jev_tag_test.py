@@ -90,6 +90,13 @@ def self_test():
     check("human security floor", d2["security_band"] == "high"
           and d2["codex_post"] is True
           and d2["human_security_label"] is True)
+    prior_self = {"pr_applied": ["type:security"], "issue_applied": [],
+                  "issue_number": None}
+    d3 = decide(sec_bundle, plain, None, prior=prior_self)
+    check("self-applied security no floor",
+          d3["human_security_label"] is False
+          and d3["security_band"] == "unknown"
+          and d3["codex_post"] is False)
     check("decide codex post", d["codex_post"] is True)
     check("decide security type", "security" in d["types"])
     check("decide flagship floor P1", d["priority"] == "P1")

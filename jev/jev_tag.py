@@ -199,23 +199,31 @@ def marker_body(state, d, adds_pr, adds_issue, codex_now):
     return f"<!-- jev-tag:v1 {payload} -->\n" + " · ".join(lines)
 
 
-def apply_decision(gh, bundle, d):
+def apply_decision(gh, bundle, d, comments=None):
     """Write labels + marker + Codex trigger. Returns an applied
-    record. Individual failures are logged, never raised."""
+    record. Individual failures are logged, never raised.
+
+    `comments` may carry the PR comment history fetched by the
+    caller: a list, or False when that fetch already failed."""
     repo = bundle["repo"]
     pr_no = bundle["pr_number"]
     out = {"pr_added": [], "issue_added": [], "vetoed_pr": [],
            "vetoed_issue": [], "codex_posted_now": False,
            "errors": []}
-    try:
-        comments = gh.get_all(f"/repos/{repo}/issues/{pr_no}/comments")
-    except GhError as exc:
+    if comments is False:
         # Vetoes and the Codex dedupe depend on the real comment
         # history; on retrieval failure, write nothing at all and
         # let a later run retry with the actual marker.
-        out["errors"].append(
-            f"comments fetch failed, apply aborted: {exc}")
+        out["errors"].append("comments fetch failed, apply aborted")
         return out
+    if comments is None:
+        try:
+            comments = gh.get_all(
+                f"/repos/{repo}/issues/{pr_no}/comments")
+        except GhError as exc:
+            out["errors"].append(
+                f"comments fetch failed, apply aborted: {exc}")
+            return out
     marker_comment, state = find_marker(comments)
     state.setdefault("pr_applied", [])
     state.setdefault("issue_applied", [])
@@ -325,10 +333,24 @@ def run(repo, pr_number, mode, workdir):
     except JevError as exc:
         record["jev_error"] = str(exc)
         warn(str(exc))
-    d = decide(bundle, l1, jev)
+    comments, prior = None, None
+    if mode == "apply":
+        # Fetch the comment history once: decide() needs the marker
+        # state (self-applied labels are not a human floor) and
+        # apply_decision needs it for vetoes and dedupe.
+        try:
+            comments = gh.get_all(
+                f"/repos/{repo}/issues/{pr_number}/comments")
+            _, prior = find_marker(comments)
+        except GhError as exc:
+            comments = False
+            record["comments_error"] = str(exc)
+            warn(f"comments fetch failed: {exc}")
+    d = decide(bundle, l1, jev, prior=prior)
     record["decision"] = d
     if mode == "apply":
-        record["applied"] = apply_decision(gh, bundle, d)
+        record["applied"] = apply_decision(gh, bundle, d,
+                                            comments=comments)
     return record
 
 
