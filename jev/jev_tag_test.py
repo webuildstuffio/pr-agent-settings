@@ -127,6 +127,21 @@ def self_test():
                   "pr_title": "t", "pr_body": "", "issue": None})
     check("layer1 whole-word only", sub["evidence"].get("infra-CI")
           == ["docs/webhook-guide.md", "src/upload/handler.ts"])
+    kept = layer1({"files": [
+        {"path": "src/auth/tokens.ts", "additions": 1,
+         "deletions": 0},
+        {"path": "certs/access-tokens.key", "additions": 1,
+         "deletions": 0},
+        {"path": ".github/workflows/rotate-tokens.yml",
+         "additions": 1, "deletions": 0}],
+        "pr_title": "t", "pr_body": "", "issue": None})
+    check("tokens-named security paths keep evidence",
+          kept["evidence"].get("auth") == ["src/auth/tokens.ts"]
+          and kept["evidence"].get("secrets")
+          == ["certs/access-tokens.key"]
+          and kept["evidence"].get("infra-CI")
+          == [".github/workflows/rotate-tokens.yml"]
+          and kept["critical"])
     low = {"answers": {
         "security_related": {"type": "noul", "noul": 0.19},
         "blast_radius": {"type": "score", "score": 2.0},
@@ -189,6 +204,14 @@ def self_test():
     check("mid psec category agrees security type",
           "security" in d10["types"]
           and d10["security_type_warranted"] is True)
+    oos = {"answers": dict(mid_none["answers"],
+        security_category={"type": "choice",
+                           "probabilities": {"bogus-cat": 0.9}})}
+    d12 = decide(bundle, plain, oos)
+    check("out-of-schema category grants no warrant",
+          d12["security_type_warranted"] is False
+          and "security" not in d12["types"]
+          and d12["security_category"] is None)
     low4 = {"answers": dict(low["answers"],
                             blast_radius={"type": "score",
                                           "score": 3.4})}

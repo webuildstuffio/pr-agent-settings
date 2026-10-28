@@ -94,25 +94,28 @@ DEP_MANIFESTS = {
 def _path_categories(path):
     """(categories, critical) for one changed path, by directory
     semantics: whole directory components and whole filename-stem
-    words only. Design-token files (styling values) are excluded
-    before any word can match: they must never hard-hit."""
+    words only. Design-token files (styling values) get no
+    stem-word matches, so token semantics can never create
+    evidence on their own; directory words and the exact
+    basename/extension rules still apply to them."""
     comps = [c for c in path.lower().split("/") if c]
     if not comps:
         return set(), False
     base = comps[-1]
     stem = base.rsplit(".", 1)[0] if "." in base else base
     ext = "." + base.rsplit(".", 1)[1] if "." in base else ""
-    if (stem == "tokens" or stem.endswith(("-tokens", "_tokens",
-                                           ".tokens"))
-            or "design-token" in stem
-            or "design-tokens" in comps
-            or "design_tokens" in comps):
-        return set(), False
+    design_token = (stem == "tokens"
+                    or stem.endswith(("-tokens", "_tokens",
+                                      ".tokens"))
+                    or "design-token" in stem
+                    or "design-tokens" in comps
+                    or "design_tokens" in comps)
     words = set()
     for comp in comps[:-1]:
         words.add(comp)
         words.update(re.split(r"[-_]", comp))
-    words.update(re.split(r"[-_]", stem))
+    if not design_token:
+        words.update(re.split(r"[-_]", stem))
     cats = set()
     crit = False
     if comps[:2] == [".github", "workflows"]:
@@ -470,7 +473,7 @@ def decide(bundle, l1, jev, prior=None):
     # in apply mode, and the type then cascaded into the flagship
     # priority floor. Jev's secrets_in_text at high is a direct
     # detection of pasted secret material and also warrants.
-    cat_agrees = cat is not None and cat != "none"
+    cat_agrees = cat in SEC_CATEGORIES and cat != "none"
     sec_type_warranted = (
         l1_hard or human_sec
         or (secrets_txt is not None and secrets_txt >= SEC_HIGH)
