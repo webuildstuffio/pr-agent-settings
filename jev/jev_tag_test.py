@@ -149,7 +149,7 @@ class FakeGh2:
 
 
 def marker_comment(state):
-    return {"user": {"login": "github-actions[bot]"},
+    return {"id": 424242, "user": {"login": "github-actions[bot]"},
             "body": "<!-- jev-tag:v1 " + json.dumps(state) + " --> x"}
 
 
