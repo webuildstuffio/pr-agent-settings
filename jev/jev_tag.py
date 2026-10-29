@@ -5,15 +5,23 @@ Runs at the end of the qodo-review workflow's `suggest` job. For one
 PR: gathers state via the GitHub API, runs deterministic Layer 1
 security rules, asks Jev (typesafe/jev-1.14, OpenRouter Decisions API)
 the label job sheet in one request, then (in --mode apply) adds
-schema-v4.2 labels to the PR and its linked issue and posts
-`@codex security review` once when the security band fires.
+schema-v4.2 labels to the PR and its linked issue. When the
+security post rule fires, the `@codex security review` trigger is
+rendered once as a delimited section inside the sticky comment
+(never as a separate comment). The sticky is created/PATCHed
+with the JEV_MENTION_PAT token when the wiring provides it, so
+the mention is authored by the token's owner (a connected Codex
+user) instead of github-actions[bot], whose mentions Codex
+ignores; all other calls keep GITHUB_TOKEN, and without a usable
+PAT the step degrades to that workflow-token path as before.
 
 Guardrails: Jev only upgrades security; the step never removes a
 label; human-removed labels are never re-added (marker comment);
 priority is clamped by repo tier; fail-open (warning + exit 0) so it
 can never break the Qodo job. Python 3 stdlib only; the decision
 logic lives in jev_lib.py, fetched alongside this file.
-Env: GITHUB_TOKEN, OPENROUTER_API_KEY. Prints a JSON decision record.
+Env: GITHUB_TOKEN, OPENROUTER_API_KEY, JEV_MENTION_PAT (optional).
+Prints a JSON decision record.
 """
 
 import argparse
@@ -173,14 +181,16 @@ def fetch_bundle(gh, repo, pr_number, workdir):
     return bundle
 
 
-def find_marker(comments):
+def find_marker(comments, extra_authors=()):
     """(comment, state dict) of the newest jev-tag marker comment.
 
-    Only github-actions[bot] markers are trusted: anyone who can
-    comment could otherwise forge state to suppress the Codex
-    security trigger or veto labels."""
+    Trusted authors: github-actions[bot] plus any `extra_authors`
+    (the JEV_MENTION_PAT owner's login, resolved from the token
+    itself; that human is the label-floor authority). Anyone else
+    could forge state to suppress the Codex trigger or veto."""
+    trusted = {"github-actions[bot]"} | set(extra_authors)
     for c in reversed(comments):
-        if (c.get("user") or {}).get("login") != "github-actions[bot]":
+        if (c.get("user") or {}).get("login") not in trusted:
             continue
         m = MARKER_RE.search(c.get("body") or "")
         if m:
@@ -197,7 +207,7 @@ BAND_DOTS = {"high": "🔴", "mid": "🟡", "low": "🟢"}
 
 
 def marker_body(state, d, adds_pr, adds_issue, codex_now,
-                issue_number=None, skipped=None):
+                issue_number=None, skipped=None, escalated=False):
     """The sticky status comment: compact and scannable (a reviewer
     should read it in ~5 seconds). The machine state stays hidden in
     the HTML-comment marker; nothing raw is rendered."""
@@ -237,6 +247,9 @@ def marker_body(state, d, adds_pr, adds_issue, codex_now,
     elif d.get("codex_post"):
         sec += " · Codex review due (already present)"
     lines.append(sec)
+    if escalated:
+        # Body rebuilt from scratch per render: exactly one section.
+        lines.extend(escalation_section(d))
     themes = d.get("themes") or []
     eff = d.get("effort")
     lines.append("🏷️ Themes: "
@@ -324,7 +337,10 @@ def codex_focus(d):
     """Codex trigger comment body: the exact trigger string verbatim
     on line 1 (so the mention parses as the review request, not a
     free-form task), then Jev's specific concerns in the SAME comment
-    (owner correction 2026-10-28: less auto, more specific)."""
+    (owner correction 2026-10-28: less auto, more specific).
+
+    Since v2.1.0 the trigger ships via escalation_section() inside
+    the sticky; this stays as the reference rendering for it."""
     lines = ["@codex security review", "",
              "Jev context for this review:"]
     band = d.get("security_band") or "unknown"
@@ -354,6 +370,45 @@ def codex_focus(d):
     return "\n".join(lines)
 
 
+def escalation_section(d):
+    """The Codex escalation block inside the sticky (v2.1.0, owner
+    call 2026-10-28): the trigger rides in the sticky instead of a
+    separate bot comment Codex ignores. The trigger string is an
+    exact line of its own; EVERY interpolated value is code-span
+    escaped (the PR #26 rule, all values), so no author-controlled
+    string can fire a mention or break out of its span."""
+    lines = ["---", "🔐 **Codex security review**", "",
+             "@codex security review", "", "Jev context for this review:"]
+    band = d.get("security_band") or "unknown"
+    p = d.get("p_security_jev")
+    ptxt = f"{p:.2f}" if isinstance(p, (int, float)) else "n/a"
+    sec = f"- Security: band {_code_span(str(band))}, P {ptxt}"
+    blast = d.get("blast_radius")
+    if isinstance(blast, (int, float)):
+        sec += f", blast radius {blast} of 5"
+    elif blast is not None:
+        sec += f", blast radius {_code_span(str(blast))}"
+    cat = d.get("security_category")
+    if cat and cat != "none":
+        sec += f", area: {_code_span(str(cat))}"
+    lines.append(sec)
+    files = []
+    for h in (d.get("layer1") or {}).get("hits") or []:
+        if h.get("kind") == "path" and h.get("match") not in files:
+            files.append(h["match"])
+    if files:
+        lines.append("- Files of concern: "
+                     + ", ".join(_code_span(str(f))
+                                 for f in files[:5]))
+    elif d.get("top_areas"):
+        lines.append("- Areas of concern: "
+                     + ", ".join(_code_span(str(a))
+                                 for a in d["top_areas"]))
+    if d.get("perf_flag"):
+        lines.append("- Performance risk also flagged by Jev")
+    return lines
+
+
 def escalation_comment(d):
     """The would-be deep-review comment text (record-only mode: built
     and logged, never posted). Review-only instruction first, then
@@ -377,17 +432,21 @@ def escalation_comment(d):
     return ESCALATION_COMMENT + focus
 
 
-def apply_decision(gh, bundle, d, comments=None):
-    """Write labels + marker + Codex trigger. Returns an applied
-    record. Individual failures are logged, never raised.
+def apply_decision(gh, bundle, d, comments=None, mention_gh=None,
+                   mention_login=None):
+    """Write labels + marker (Codex trigger folded into it).
+    Returns an applied record; failures are logged, never raised.
 
-    `comments` may carry the PR comment history fetched by the
-    caller: a list, or False when that fetch already failed."""
+    `comments`: the PR history from the caller (False when that
+    fetch already failed). `mention_gh`/`mention_login`: the
+    JEV_MENTION_PAT client + owner login; owner markers are
+    trusted, and sticky writes are author-matched (see below)."""
     repo = bundle["repo"]
     pr_no = bundle["pr_number"]
     out = {"pr_added": [], "issue_added": [], "vetoed_pr": [],
            "vetoed_issue": [], "missing_pr": [], "missing_issue": [],
            "labels_guard": "off", "codex_posted_now": False,
+           "sticky_identity": "owner-pat" if mention_gh else "workflow-token",
            "errors": []}
     if comments is False:
         # Vetoes and the Codex dedupe depend on the real comment
@@ -403,7 +462,8 @@ def apply_decision(gh, bundle, d, comments=None):
             out["errors"].append(
                 f"comments fetch failed, apply aborted: {exc}")
             return out
-    marker_comment, state = find_marker(comments)
+    marker_comment, state = find_marker(
+        comments, [mention_login] if mention_login else ())
     state.setdefault("pr_applied", [])
     state.setdefault("issue_applied", [])
     state.setdefault("issue_number", None)
@@ -501,17 +561,11 @@ def apply_decision(gh, bundle, d, comments=None):
         for c in comments)
     d["codex_posted_before"] = bool(state["codex_posted"]
                                     or already_mentioned)
-    codex_now = False
-    if d["codex_post"] and not d["codex_posted_before"]:
-        try:
-            # Trigger string verbatim on line 1; Jev's specific focus
-            # follows in the same comment (codex_focus).
-            gh.call("POST", f"/repos/{repo}/issues/{pr_no}/comments",
-                    {"body": codex_focus(d)})
-            codex_now = True
-        except GhError as exc:
-            out["errors"].append(f"codex comment: {exc}")
-    out["codex_posted_now"] = codex_now
+    # v2.1.0: no separate mention comment. The trigger renders
+    # into the sticky below; state["codex_posted"] in that sticky
+    # keeps it one-shot, and a failed sticky write never persists
+    # the state, so the next run retries the escalation.
+    codex_now = bool(d["codex_post"] and not d["codex_posted_before"])
 
     state["pr_applied"] = sorted(set(state["pr_applied"]) | set(applied_pr))
     state["issue_applied"] = sorted(set(state["issue_applied"]) | set(applied_issue))
@@ -531,7 +585,8 @@ def apply_decision(gh, bundle, d, comments=None):
            for x in out["missing_issue"]])
     body = marker_body(state, d, applied_pr, applied_issue, codex_now,
                        issue_number=(issue or {}).get("number"),
-                       skipped=skipped)
+                       skipped=skipped,
+                       escalated=bool(state["codex_posted"]))
     # A first marker also posts when nothing was applied but the run
     # has something a reviewer must see (perf/readiness/impact flags,
     # skipped labels, a would-fire escalation); otherwise those
@@ -542,14 +597,57 @@ def apply_decision(gh, bundle, d, comments=None):
         or d.get("perf_flag") or d.get("issue_ready_low")
         or d.get("user_impact") in ("visible", "behavior-changing")
         or (d.get("escalation") or {}).get("would_fire"))
+    # Sticky writes are author-bound: GitHub lets only a comment's
+    # author edit it, so the client follows the marker's author,
+    # not whichever tokens exist (Kody finding on PR #34: a PAT
+    # PATCH of a bot-authored sticky 403s, the state never
+    # persists, and the escalation retries forever). A legacy
+    # bot-authored sticky is PATCHed through the workflow token;
+    # when the escalation must fire on one and the PAT is wired, a
+    # fresh owner-authored sticky supersedes it instead (a trigger
+    # inside a bot comment is one Codex ignores) and the bot
+    # sticky is deleted best-effort. Fresh stickies go through the
+    # mention client when wired. Other calls stay on `gh`.
+    marker_author = ((marker_comment or {}).get("user")
+                     or {}).get("login")
+    write_ok = False
     try:
-        if marker_comment:
-            gh.call("PATCH", f"/repos/{repo}/issues/comments/{marker_comment['id']}", {"body": body})
+        if (marker_comment and codex_now and mention_gh is not None
+                and marker_author != mention_login):
+            mention_gh.call("POST",
+                            f"/repos/{repo}/issues/{pr_no}/comments",
+                            {"body": body})
+            write_ok = True
+            out["sticky_identity"] = "owner-pat"
+            try:
+                gh.call("DELETE", f"/repos/{repo}/issues/comments/"
+                        f"{marker_comment['id']}")
+            except GhError as exc:
+                out["errors"].append(f"old marker delete: {exc}")
+        elif marker_comment:
+            patch_gh = (mention_gh if mention_gh is not None
+                        and marker_author == mention_login else gh)
+            patch_gh.call("PATCH", f"/repos/{repo}/issues/comments/"
+                          f"{marker_comment['id']}", {"body": body})
+            write_ok = True
+            out["sticky_identity"] = (
+                "owner-pat" if patch_gh is mention_gh
+                else "workflow-token")
         elif show_worthy:
-            gh.call("POST", f"/repos/{repo}/issues/{pr_no}/comments",
-                    {"body": body})
+            create_gh = mention_gh if mention_gh is not None else gh
+            create_gh.call("POST",
+                           f"/repos/{repo}/issues/{pr_no}/comments",
+                           {"body": body})
+            write_ok = True
+            out["sticky_identity"] = (
+                "owner-pat" if create_gh is mention_gh
+                else "workflow-token")
     except GhError as exc:
         out["errors"].append(f"marker: {exc}")
+    # Claim the Codex delivery only when the sticky carrying the
+    # trigger actually landed: a failed write persists no state,
+    # so the next run retries, and the record must not run ahead.
+    out["codex_posted_now"] = bool(codex_now and write_ok)
     return out
 
 
@@ -563,6 +661,25 @@ def run(repo, pr_number, mode, workdir):
         warn(record["error"])
         return record
     gh = Gh(token)
+    # Mention identity (v2.1.0): with JEV_MENTION_PAT wired, the
+    # sticky (and the Codex mention in it) is owner-authored. The
+    # login is resolved from the token so owner markers can be
+    # trusted later; any failure degrades to the workflow token.
+    mention_gh, mention_login = None, None
+    mention_token = (os.environ.get("JEV_MENTION_PAT") or "").strip()
+    if mention_token:
+        candidate = Gh(mention_token)
+        try:
+            me = candidate.call("GET", "/user")
+            login = me.get("login") if isinstance(me, dict) else None
+            if login:
+                mention_gh, mention_login = candidate, login
+            else:
+                warn("JEV_MENTION_PAT: no login from /user; sticky on workflow token")
+        except GhError as exc:
+            warn(f"JEV_MENTION_PAT unusable ({exc}); sticky on workflow token")
+    record["sticky_identity"] = "owner-pat" if mention_gh else "workflow-token"
+    record["mention_login"] = mention_login
     try:
         bundle = fetch_bundle(gh, repo, pr_number, workdir)
     except GhError as exc:
@@ -593,7 +710,8 @@ def run(repo, pr_number, mode, workdir):
         try:
             comments = gh.get_all(
                 f"/repos/{repo}/issues/{pr_number}/comments")
-            _, prior = find_marker(comments)
+            _, prior = find_marker(
+                comments, [mention_login] if mention_login else ())
         except GhError as exc:
             comments = False
             record["comments_error"] = str(exc)
@@ -603,8 +721,9 @@ def run(repo, pr_number, mode, workdir):
         d["escalation"]["comment"] = escalation_comment(d)
     record["decision"] = d
     if mode == "apply":
-        record["applied"] = apply_decision(gh, bundle, d,
-                                            comments=comments)
+        record["applied"] = apply_decision(
+            gh, bundle, d, comments=comments,
+            mention_gh=mention_gh, mention_login=mention_login)
     return record
 
 

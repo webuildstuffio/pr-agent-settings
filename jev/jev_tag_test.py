@@ -14,8 +14,8 @@ from jev_lib import (STATE_BUDGET, VERSION, build_questions,
                      build_state, clamp_priority, decide, layer1,
                      plan_labels, repo_specialties)
 from jev_tag import (Gh, GhError, apply_decision, codex_focus,
-                     escalation_comment, find_marker,
-                     match_user_facing_label, marker_body,
+                     escalation_comment, escalation_section,
+                     find_marker, match_user_facing_label, marker_body,
                      parse_linked_issue)
 
 
@@ -453,10 +453,10 @@ def apply_tests():
     out = apply_decision(gh, bundle, dict(d_sec))
     check("codex boilerplate does not dedupe the trigger",
           out["codex_posted_now"] is True
-          and any((p.get("body") or "").splitlines()[0]
-                  == "@codex security review"
-                  and "band high" in p["body"]
-                  for p in gh.comment_posts))
+          and len(gh.comment_posts) == 1
+          and "@codex security review"
+          in (gh.comment_posts[0].get("body") or "").splitlines()
+          and "band `high`" in gh.comment_posts[0]["body"])
     human_mention = [{"user": {"login": "nichm"},
                       "body": "@codex security review"}]
     gh = FakeGh2(comments=human_mention)
@@ -789,5 +789,228 @@ def v2_tests():
     return 0 if ok else 1
 
 
+class RecGh:
+    """Recording Gh stand-in: captures every call so tests can see
+    WHICH client (workflow token vs mention PAT) made it."""
+
+    def __init__(self, comments=None):
+        self.comments = comments or []
+        self.calls = []
+
+    def get_all(self, path):
+        return self.comments
+
+    def call(self, method, path, body=None, ok_missing=False):
+        self.calls.append((method, path, body))
+        return {}
+
+    def sticky_writes(self):
+        return [c for c in self.calls if c[0] == "PATCH"
+                or (c[0] == "POST" and c[1].endswith("/comments"))]
+
+    def label_writes(self):
+        return [c for c in self.calls if c[1].endswith("/labels")]
+
+
+def v21_tests():
+    """v2.1.0: the Codex mention is a delimited section inside the
+    sticky comment, and the sticky is created/PATCHed through the
+    JEV_MENTION_PAT client when one is wired (workflow-token
+    fallback otherwise)."""
+    ok = True
+
+    def check(name, cond):
+        nonlocal ok
+        print(("PASS " if cond else "FAIL ") + name)
+        ok = ok and bool(cond)
+
+    check("version is 2.1.0", VERSION == "2.1.0")
+    auth_hit = {"kind": "path", "match": "src/auth/login.ts",
+                "category": "auth", "critical": False}
+    d_full = {"labels_desired": ["P1", "type:security"],
+              "codex_post": True, "security_band": "high",
+              "p_security_jev": 0.93, "blast_radius": 4,
+              "security_category": "auth", "perf_flag": True,
+              "p_perf_risk": 0.9, "themes": [], "effort": None,
+              "layer1": {"any": True, "hits": [auth_hit]}}
+    state0 = {"pr_applied": [], "issue_applied": [],
+              "issue_number": None, "codex_posted": False, "runs": 1}
+    bundle = {"repo": "o/r", "pr_number": 7, "pr_labels": [],
+              "issue": None, "repo_labels": None}
+
+    def owner_marker(state, login="ownerx", cid=777):
+        return {"id": cid, "user": {"login": login},
+                "body": "<!-- jev-tag:v1 " + json.dumps(state)
+                        + " -->\nsticky"}
+
+    # --- the section itself
+    section = escalation_section(d_full)
+    text = "\n".join(section)
+    check("section trigger is an exact line",
+          "@codex security review" in section)
+    check("section delimited, focus lines tailored + escaped",
+          section[0] == "---"
+          and "🔐 **Codex security review**" in section[1]
+          and "band `high`" in text and "P 0.93" in text
+          and "blast radius 4 of 5" in text
+          and "area: `auth`" in text
+          and "`src/auth/login.ts`" in text
+          and "Performance risk" in text)
+    d_evil = {"security_band": "high`@x", "p_security_jev": 0.9,
+              "blast_radius": "5`@y", "security_category": "auth`@z",
+              "layer1": {"any": True, "hits": [
+                  {"kind": "path",
+                   "match": "src/@codex security review`.ts",
+                   "category": "auth", "critical": False}]}}
+    section = escalation_section(d_evil)
+    text = "\n".join(section)
+    check("hostile values mint no second trigger line",
+          [ln for ln in section
+           if ln == "@codex security review"]
+          == ["@codex security review"])
+    check("hostile values neutralized inside code spans",
+          "`src/@codex security review'.ts`" in text
+          and "`auth'@z`" in text and "`high'@x`" in text
+          and "`5'@y`" in text)
+
+    # --- marker_body integration
+    body = marker_body(state0, dict(d_full, codex_post=False),
+                       [], [], False)
+    check("no section when the gate never fired",
+          "@codex security review" not in body)
+    body = marker_body(state0, d_full, ["P1"], [], True,
+                       escalated=True)
+    check("escalated sticky: exactly one section + trigger line",
+          [ln for ln in body.splitlines()
+           if ln == "@codex security review"]
+          == ["@codex security review"]
+          and body.count("🔐 **Codex security review**") == 1)
+
+    # --- marker trust with the PAT owner's login
+    comment, state = find_marker([owner_marker(state0)])
+    check("owner marker ignored without extra authors",
+          comment is None)
+    comment, state = find_marker([owner_marker(state0)], ["ownerx"])
+    check("owner marker trusted with extra authors",
+          comment is not None and state["runs"] == 1)
+    comment, state = find_marker(
+        [owner_marker(state0, login="mallory")], ["ownerx"])
+    check("third-party marker still forged-ignored",
+          comment is None)
+
+    # --- token selection: PATCH an owner-authored sticky
+    main_gh, pat_gh = RecGh(), RecGh()
+    out = apply_decision(main_gh, bundle, dict(d_full),
+                         comments=[owner_marker(state0)],
+                         mention_gh=pat_gh, mention_login="ownerx")
+    writes = pat_gh.sticky_writes()
+    check("sticky PATCH goes through the PAT client",
+          len(writes) == 1 and writes[0][0] == "PATCH"
+          and writes[0][1] == "/repos/o/r/issues/comments/777"
+          and main_gh.sticky_writes() == [])
+    check("patched sticky carries the trigger exactly once",
+          [ln for ln in writes[0][2]["body"].splitlines()
+           if ln == "@codex security review"]
+          == ["@codex security review"])
+    check("labels stay on the workflow-token client",
+          len(main_gh.label_writes()) == 1
+          and pat_gh.label_writes() == [])
+    check("identity recorded as owner-pat",
+          out["sticky_identity"] == "owner-pat")
+
+    # --- token selection: create a fresh sticky via the PAT
+    main_gh, pat_gh = RecGh(), RecGh()
+    out = apply_decision(main_gh, bundle, dict(d_full), comments=[],
+                         mention_gh=pat_gh, mention_login="ownerx")
+    writes = pat_gh.sticky_writes()
+    check("sticky create goes through the PAT client",
+          len(writes) == 1 and writes[0][0] == "POST"
+          and "jev-tag:v1" in writes[0][2]["body"]
+          and main_gh.sticky_writes() == [])
+
+    # --- fallback: no PAT wired, owner marker is not trusted and
+    # the sticky is (re)created on the workflow token
+    main_gh = RecGh()
+    out = apply_decision(main_gh, bundle, dict(d_full),
+                         comments=[owner_marker(state0)])
+    writes = main_gh.sticky_writes()
+    check("fallback: workflow token, fresh sticky POST",
+          len(writes) == 1 and writes[0][0] == "POST"
+          and out["sticky_identity"] == "workflow-token")
+
+    # --- re-render dedupe: a second run PATCHes the same sticky
+    # and the escalation section survives exactly once
+    gh1 = RecGh()
+    apply_decision(gh1, bundle, dict(d_full), comments=[])
+    posted = gh1.sticky_writes()[0][2]["body"]
+    round1 = {"id": 555, "user": {"login": "github-actions[bot]"},
+              "body": posted}
+    gh2 = RecGh()
+    out2 = apply_decision(gh2, bundle, dict(d_full),
+                          comments=[round1])
+    writes = gh2.sticky_writes()
+    patched = writes[0][2]["body"] if writes else ""
+    check("re-render PATCHes, one section, no duplicates",
+          len(writes) == 1 and writes[0][0] == "PATCH"
+          and [ln for ln in patched.splitlines()
+               if ln == "@codex security review"]
+          == ["@codex security review"]
+          and patched.count("🔐 **Codex security review**") == 1)
+    check("second run does not re-fire the escalation",
+          out2["codex_posted_now"] is False)
+
+    # --- author-matched writes (Kody finding on PR #34): a legacy
+    # bot-authored sticky is PATCHed through the workflow token
+    # even when the PAT is wired; only its author can edit it
+    bot_marker = {"id": 888,
+                  "user": {"login": "github-actions[bot]"},
+                  "body": "<!-- jev-tag:v1 " + json.dumps(state0)
+                          + " -->\nsticky"}
+    main_gh, pat_gh = RecGh(), RecGh()
+    out = apply_decision(main_gh, bundle, dict(d_full,
+                                               codex_post=False),
+                         comments=[bot_marker],
+                         mention_gh=pat_gh, mention_login="ownerx")
+    writes = main_gh.sticky_writes()
+    check("legacy bot sticky PATCHes on the workflow token",
+          len(writes) == 1 and writes[0][0] == "PATCH"
+          and writes[0][1] == "/repos/o/r/issues/comments/888"
+          and pat_gh.sticky_writes() == []
+          and out["sticky_identity"] == "workflow-token")
+
+    # --- escalation on a legacy bot sticky: a fresh owner sticky
+    # supersedes it (a trigger in a bot comment is ignored)
+    main_gh, pat_gh = RecGh(), RecGh()
+    out = apply_decision(main_gh, bundle, dict(d_full),
+                         comments=[bot_marker],
+                         mention_gh=pat_gh, mention_login="ownerx")
+    writes = pat_gh.sticky_writes()
+    deletes = [c for c in main_gh.calls if c[0] == "DELETE"]
+    check("escalation supersedes: owner POST + old sticky deleted",
+          len(writes) == 1 and writes[0][0] == "POST"
+          and [ln for ln in writes[0][2]["body"].splitlines()
+               if ln == "@codex security review"]
+          == ["@codex security review"]
+          and len(deletes) == 1
+          and deletes[0][1] == "/repos/o/r/issues/comments/888"
+          and out["codex_posted_now"] is True
+          and out["sticky_identity"] == "owner-pat")
+
+    # --- a failed sticky write must not claim the Codex delivery
+    class FailGh(RecGh):
+        def call(self, method, path, body=None, ok_missing=False):
+            if method in ("POST", "PATCH", "DELETE"):
+                raise GhError("403: author mismatch")
+            return super().call(method, path, body, ok_missing)
+
+    out = apply_decision(FailGh(), bundle, dict(d_full), comments=[])
+    check("failed sticky write: no delivery claimed, error kept",
+          out["codex_posted_now"] is False
+          and any("marker" in e for e in out["errors"]))
+    print("V21-TEST " + ("OK" if ok else "FAILED"))
+    return 0 if ok else 1
+
+
 if __name__ == "__main__":
-    sys.exit(1 if (self_test() or apply_tests() or v2_tests()) else 0)
+    sys.exit(1 if (self_test() or apply_tests() or v2_tests()
+                   or v21_tests()) else 0)
