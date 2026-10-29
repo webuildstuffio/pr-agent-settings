@@ -35,13 +35,13 @@ SEC_MID = 0.40                # P(security) mid band
 STATE_BUDGET = 27000          # bytes; Jev long-context mode starts ~32k
 
 # Step version (NOT the marker state schema, which stays jev-tag:v1).
-# v2.0.0 = the combined 2026-10-28 release: the label-guard/specialty/
-# new-questions iteration plus the warrant gate and the paths-only
-# Layer 1 (keyword evidence deleted). Decision behavior changed
-# materially, so runs across this boundary are not comparable.
-# v2.0.1 = dotted compound stems (auth.service.ts) tokenize on dots
-# too, restoring their Layer 1 evidence (Kody finding on PR #27).
-VERSION = "2.0.1"
+# v2.0.0 = the combined 2026-10-28 release: label-guard/specialty/
+# new-questions + warrant gate + paths-only Layer 1 (keyword
+# evidence deleted); runs across this boundary are not comparable.
+# v2.0.1 = dotted compound stems tokenize on dots too (PR #27).
+# v2.1.0 = Codex mention folded into the sticky (delimited section,
+# not a separate comment); sticky uses the JEV_MENTION_PAT token.
+VERSION = "2.1.0"
 
 # Fleet label schema v4.2 generic set (53). Anything in a repo's live
 # label list NOT in this set counts as a repo specialty label.

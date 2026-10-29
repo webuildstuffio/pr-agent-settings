@@ -19,10 +19,18 @@ security trigger, and sticky comment land before the pr-agent run:
    effort, owner labels, plus record-only Codex-worth and low-risk
    signals), with the Layer 1 evidence shown as facts, not
    conclusions.
-4. Adds schema-v4.2 labels to the PR and its linked issue, and posts
-   `@codex security review` once when the post rule fires: a hard
-   Layer 1 path hit, a high Jev security probability, or a mid-range
-   Jev probability with blast radius 4+. The type:security label
+4. Adds schema-v4.2 labels to the PR and its linked issue. When the
+   post rule fires (a hard Layer 1 path hit, a high Jev security
+   probability, or a mid-range Jev probability with blast radius
+   4+), the `@codex security review` trigger is rendered once as a
+   delimited section inside the sticky comment, with Jev's focus
+   lines; no separate mention comment is posted. The sticky is
+   created and PATCHed with the `JEV_MENTION_PAT` org secret when
+   the wiring passes it through, so the sticky and the mention in
+   it are authored by the owner's account (a connected Codex
+   user) instead of github-actions[bot], whose mentions Codex
+   ignores; without the secret everything runs on the workflow
+   token as before. The type:security label
    additionally requires a warrant: a hard path hit, or Jev's own
    verdict with category agreement (its category answer is not
    "none") at mid band or higher, or a high-confidence
@@ -56,11 +64,13 @@ python3 /tmp/jev_tag.py --repo "$GITHUB_REPOSITORY" --pr "$PR" \
 
 Edit the script here, merge, then bump the pinned SHA in each wired
 repo's `qodo-review.yml` to the new main commit. The step carries a
-version (`VERSION` in `jev_lib.py`, currently v2.0.1; the v1 to v2
+version (`VERSION` in `jev_lib.py`, currently v2.1.0; the v1 to v2
 jump marks the warrant gate plus the paths-only Layer 1, whose
 decisions are not comparable to v1 runs; v2.0.1 tokenizes dotted
-compound stems such as auth.service.ts). Wirings stamp the version
-as a `# jev-tag v2.0.1` comment above the step and the sticky comment
+compound stems such as auth.service.ts; v2.1.0 folds the Codex
+mention into the sticky comment and adds the JEV_MENTION_PAT
+owner-identity sticky path). Wirings stamp the version
+as a `# jev-tag v2.1.0` comment above the step and the sticky comment
 footer shows it. Mode is controlled per repo by the `JEV_TAG_MODE`
 repository variable (`dry-run` or `apply`; default `apply` when
 unset). Python 3 standard library only.
