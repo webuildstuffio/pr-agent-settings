@@ -234,6 +234,49 @@ def self_test():
     d5 = decide(bundle, plain, low4)
     check("low psec has no band to escalate",
           d5["security_band"] == "low" and d5["codex_post"] is False)
+    # folio-app #3118 (+8h audit): a data-PII hit matched ONLY by
+    # tech words (d1) or the bare .sql rule is data evidence, not
+    # security evidence: no high band, no security type, no post.
+    fix3118 = {"files": [
+        {"path": "src/lib/price-history/price-history-d1.ts",
+         "additions": 90, "deletions": 10}],
+        "pr_title": "fix(price-history): upsert guards",
+        "pr_body": "", "issue": None}
+    l1_3118 = layer1(fix3118)
+    check("3118 d1 hit recorded as data evidence",
+          l1_3118["any"] and l1_3118["hard"]
+          and l1_3118["categories"] == ["data-PII"]
+          and l1_3118["security_hard"] is False)
+    ans3118 = {"answers": {
+        "security_related": {"type": "noul", "noul": 0.14},
+        "security_category": {"type": "choice", "choice": "none",
+                              "probabilities": {"none": 0.8}},
+        "blast_radius": {"type": "score", "score": 3.4},
+        "change_type": {"type": "choice", "choice": "bug",
+                        "probabilities": {"bug": 0.85}},
+        "priority": {"type": "choice", "choice": "P2",
+                     "probabilities": {"P2": 0.7}}}}
+    d3118 = decide(dict(bundle, files=fix3118["files"]),
+                   l1_3118, ans3118)
+    check("3118 fixture low band no security no post",
+          d3118["security_band"] == "low"
+          and d3118["security_type_warranted"] is False
+          and "security" not in d3118["types"]
+          and d3118["codex_post"] is False)
+    check("layer1 bare sql is tech-only data evidence",
+          layer1({"files": [{"path": "migrations/0188_bars.sql",
+                             "additions": 5, "deletions": 0}],
+                  "pr_title": "t", "pr_body": "", "issue": None}
+                 )["security_hard"] is False)
+    check("layer1 person data words stay security evidence",
+          layer1({"files": [{"path": "src/users/account-d1.ts",
+                             "additions": 5, "deletions": 0}],
+                  "pr_title": "t", "pr_body": "", "issue": None}
+                 )["security_hard"] is True
+          and layer1({"files": [{"path": "migrations/users.sql",
+                                 "additions": 5, "deletions": 0}],
+                      "pr_title": "t", "pr_body": "", "issue": None}
+                     )["security_hard"] is True)
     mid = {"answers": {
         "security_related": {"type": "noul", "noul": 0.6},
         "blast_radius": {"type": "score", "score": 3.4},
