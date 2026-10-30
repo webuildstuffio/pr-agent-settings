@@ -1007,6 +1007,32 @@ def v21_tests():
     check("failed sticky write: no delivery claimed, error kept",
           out["codex_posted_now"] is False
           and any("marker" in e for e in out["errors"]))
+
+    # --- PAT cannot write in this repo (repo-scoped token): a
+    # non-escalation sticky falls back to the workflow token, an
+    # escalation render keeps the failure and retries instead
+    class PatFailGh(RecGh):
+        def call(self, method, path, body=None, ok_missing=False):
+            if method == "POST" and path.endswith("/comments"):
+                raise GhError("403: resource not accessible")
+            return super().call(method, path, body, ok_missing)
+
+    main_gh, pat_gh = RecGh(), PatFailGh()
+    out = apply_decision(main_gh, bundle,
+                         dict(d_full, codex_post=False), comments=[],
+                         mention_gh=pat_gh, mention_login="ownerx")
+    writes = main_gh.sticky_writes()
+    check("PAT create 403, no escalation: bot sticky fallback",
+          len(writes) == 1 and writes[0][0] == "POST"
+          and out["sticky_identity"] == "workflow-token"
+          and out["codex_posted_now"] is False)
+    main_gh, pat_gh = RecGh(), PatFailGh()
+    out = apply_decision(main_gh, bundle, dict(d_full), comments=[],
+                         mention_gh=pat_gh, mention_login="ownerx")
+    check("PAT create 403 on escalation: no bot sticky, retry kept",
+          main_gh.sticky_writes() == []
+          and out["codex_posted_now"] is False
+          and any("marker" in e for e in out["errors"]))
     print("V21-TEST " + ("OK" if ok else "FAILED"))
     return 0 if ok else 1
 

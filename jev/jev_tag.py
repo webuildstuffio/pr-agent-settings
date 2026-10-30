@@ -597,56 +597,54 @@ def apply_decision(gh, bundle, d, comments=None, mention_gh=None,
         or d.get("perf_flag") or d.get("issue_ready_low")
         or d.get("user_impact") in ("visible", "behavior-changing")
         or (d.get("escalation") or {}).get("would_fire"))
-    # Sticky writes are author-bound: GitHub lets only a comment's
-    # author edit it, so the client follows the marker's author,
-    # not whichever tokens exist (Kody finding on PR #34: a PAT
-    # PATCH of a bot-authored sticky 403s, the state never
-    # persists, and the escalation retries forever). A legacy
-    # bot-authored sticky is PATCHed through the workflow token;
-    # when the escalation must fire on one and the PAT is wired, a
-    # fresh owner-authored sticky supersedes it instead (a trigger
-    # inside a bot comment is one Codex ignores) and the bot
-    # sticky is deleted best-effort. Fresh stickies go through the
-    # mention client when wired. Other calls stay on `gh`.
-    marker_author = ((marker_comment or {}).get("user")
-                     or {}).get("login")
-    write_ok = False
+    # Sticky writes are author-bound: only a comment's author can
+    # edit it, so the client follows the marker's author, not
+    # whichever tokens exist (Kody finding, PR #34: a PAT PATCH of
+    # a bot-authored sticky 403s, state never persists, and the
+    # escalation retries forever). Legacy bot stickies are PATCHed
+    # on the workflow token; an escalation firing on one instead
+    # supersedes it with a fresh owner sticky (a trigger inside a
+    # bot comment is ignored) and deletes the old one best-effort.
+    marker_author = ((marker_comment or {}).get("user") or {}).get("login")
+    comments_url = f"/repos/{repo}/issues/{pr_no}/comments"
+    write_ok, used = False, None
     try:
         if (marker_comment and codex_now and mention_gh is not None
                 and marker_author != mention_login):
-            mention_gh.call("POST",
-                            f"/repos/{repo}/issues/{pr_no}/comments",
-                            {"body": body})
-            write_ok = True
-            out["sticky_identity"] = "owner-pat"
+            mention_gh.call("POST", comments_url, {"body": body})
+            write_ok, used = True, mention_gh
             try:
-                gh.call("DELETE", f"/repos/{repo}/issues/comments/"
-                        f"{marker_comment['id']}")
+                gh.call("DELETE", f"/repos/{repo}/issues/comments/{marker_comment['id']}")
             except GhError as exc:
                 out["errors"].append(f"old marker delete: {exc}")
         elif marker_comment:
             patch_gh = (mention_gh if mention_gh is not None
                         and marker_author == mention_login else gh)
-            patch_gh.call("PATCH", f"/repos/{repo}/issues/comments/"
-                          f"{marker_comment['id']}", {"body": body})
-            write_ok = True
-            out["sticky_identity"] = (
-                "owner-pat" if patch_gh is mention_gh
-                else "workflow-token")
+            patch_gh.call("PATCH", f"/repos/{repo}/issues/comments/{marker_comment['id']}", {"body": body})
+            write_ok, used = True, patch_gh
         elif show_worthy:
             create_gh = mention_gh if mention_gh is not None else gh
-            create_gh.call("POST",
-                           f"/repos/{repo}/issues/{pr_no}/comments",
-                           {"body": body})
+            try:
+                create_gh.call("POST", comments_url, {"body": body})
+                used = create_gh
+            except GhError:
+                if codex_now or mention_gh is None:
+                    raise
+                # PAT cannot write here (repo-scoped token; /user
+                # proved nothing about this repo). A bot sticky
+                # persists state + warnings, and no trigger rides
+                # this render, so the one-shot is not spent.
+                gh.call("POST", comments_url, {"body": body})
+                used = gh
             write_ok = True
-            out["sticky_identity"] = (
-                "owner-pat" if create_gh is mention_gh
-                else "workflow-token")
     except GhError as exc:
         out["errors"].append(f"marker: {exc}")
+    if write_ok:
+        out["sticky_identity"] = (
+            "owner-pat" if mention_gh is not None and used is mention_gh
+            else "workflow-token")
     # Claim the Codex delivery only when the sticky carrying the
-    # trigger actually landed: a failed write persists no state,
-    # so the next run retries, and the record must not run ahead.
+    # trigger actually landed; a failed write persists no state.
     out["codex_posted_now"] = bool(codex_now and write_ok)
     return out
 
