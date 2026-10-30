@@ -110,6 +110,54 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      # Jev tagging pilot (2026-10-27): Layer 1 rules + one Jev
+      # Decisions API request label the PR and its linked issue,
+      # and request a Codex security review when the band fires.
+      # Script home: webuildstuffio/pr-agent-settings/jev (public,
+      # pinned by SHA). Mode: JEV_TAG_MODE repo var (dry-run|apply).
+      # jev-tag v2.1.0
+      - name: Jev PR tagging
+        continue-on-error: true
+        if: >-
+          !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENROUTER_API_KEY: ${{ secrets.QODO_OPENROUTER_API_KEY }}
+          JEV_MENTION_PAT: ${{ secrets.JEV_MENTION_PAT }}
+          JEV_TAG_MODE: ${{ vars.JEV_TAG_MODE || 'apply' }}
+          JEV_EVENT_PR: ${{ github.event.pull_request.number }}
+        run: |
+          # Resolve the PR number in shell: the env context is not
+          # available inside a step's own env: block, so referencing
+          # env.TARGET_PR there silently yields empty on
+          # workflow_dispatch runs. TARGET_PR (exported by the
+          # github-script step above) reaches this script as a plain
+          # environment variable, which is the reliable channel.
+          pr="$JEV_EVENT_PR"
+          if [ -z "$pr" ]; then pr="$TARGET_PR"; fi
+          if [ -z "$pr" ]; then
+            echo "No PR number available; skipping Jev tagging."
+            exit 0
+          fi
+          base="https://raw.githubusercontent.com/webuildstuffio"
+          base="$base/pr-agent-settings"
+          base="$base/e460f9cd1292fe59f84dca9f1785f1f047abbaa5/jev"
+          curl -fsSL "$base/jev_lib.py" -o /tmp/jev_lib.py
+          curl -fsSL "$base/jev_tag.py" -o /tmp/jev_tag.py
+          # Execute only content matching the pinned SHA256 digests
+          # below; a mismatch skips tagging without failing the job.
+          lib_sha="faee999935a93576a9dc1a9a2cb62a51b9f18ddb2d7d8e24fc65b5810b2f6f02"
+          tag_sha="92ab17eed5922bc1d4a53fb2a6baa9bb71d3dfc944d115f37f2b38c29485ead0"
+          verified=1
+          echo "$lib_sha  /tmp/jev_lib.py" | sha256sum -c - > /dev/null || verified=0
+          echo "$tag_sha  /tmp/jev_tag.py" | sha256sum -c - > /dev/null || verified=0
+          if [ "$verified" != "1" ]; then
+            echo "::error::Jev script checksum mismatch; tagging skipped."
+            exit 0
+          fi
+          python3 /tmp/jev_tag.py --repo "$GITHUB_REPOSITORY" \
+            --pr "$pr" --mode "$JEV_TAG_MODE" || true
+
       - name: Validate Qodo model variables
         env:
           QODO_MODEL: >-
