@@ -37,7 +37,15 @@ auto_improve = true
 
 [pr_code_suggestions]
 commitable_code_suggestions = true
-suggestions_score_threshold = 8
+# Threshold lowered 8 -> 1 on 2026-10-26 (settings issue 21): the free
+# models' self-scores are noisy (a self-described critical fix scored 0 in
+# the drone run log), and at 8 pr-agent silently discarded most of its own
+# suggestions fleet-wide. 1 is the floor, not a choice: pr-agent clamps
+# this key via max(1, value) in get_suggestions_score_threshold
+# (pr_code_suggestions.py, pinned v0.48.0), the upstream default is 1,
+# and a literal 0 would silently become 1 anyway. Suggestions the model
+# scores 0 cannot be kept via this setting.
+suggestions_score_threshold = 1
 max_suggestions_per_file = 2
 num_code_suggestions_per_chunk = 3
 num_best_practice_suggestions = 2
