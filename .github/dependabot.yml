@@ -13,7 +13,7 @@ updates:
     # let a new action version bake 5 days before Dependabot
     # proposes it.
     cooldown:
-      default-days: 5
+      default-days: 7
     rebase-strategy: "auto"
     open-pull-requests-limit: 10
     groups:

@@ -84,6 +84,7 @@ jobs:
       # actions/checkout v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          persist-credentials: false
           fetch-depth: 0 # history needed for baseline diff
 
       - name: Determine base, head and scan kind
