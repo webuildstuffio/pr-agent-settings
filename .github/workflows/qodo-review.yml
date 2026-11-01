@@ -17,6 +17,12 @@
 # /review and /describe available via manual /command in PR comments.
 #
 # CHANGELOG:
+# v3.5.1: (Oct 28 2026) Gate the issue_comment trigger on the comment
+#          author's association (OWNER / MEMBER / COLLABORATOR) so only
+#          trusted commenters can trigger paid-model runs via /improve,
+#          /review or /describe (repo-review#387; owner decision
+#          2026-10-24: GATE IT). pull_request and workflow_dispatch
+#          branches unchanged.
 # v3.5.0: (Oct 26 2026) Fleet sync (repo-review#399): pin the pr-agent
 #          runtime image by the v0.48.0 Docker Hub digest (as repo-review
 #          #430) instead of inheriting the rolling action wrapper; version
@@ -26,6 +32,9 @@
 #          job timeout-minutes 8 -> 15: one run makes several tool
 #          calls, each with its own fallback chain, and at 180s a call
 #          the old cap could kill the job mid-run on a slow day.
+# v3.3.2: (Oct 26 2026) Fix: pr-agent v0.48 turns namespace-wide settings
+#          off by default; set config.global_settings_repo in the step env
+#          so webuildstuffio/pr-agent-settings keeps applying (#102).
 # v3.3.1: (Sep 30 2026) Fix: issue_comment events cancelled in-progress PR reviews
 #          via shared concurrency group. Root cause: GH Actions evaluates concurrency
 #          BEFORE job-level 'if:', so any bot comment entering the same group killed
@@ -66,6 +75,11 @@ jobs:
         (
           github.event_name == 'issue_comment' &&
           github.event.issue.pull_request &&
+          (
+            github.event.comment.author_association == 'OWNER' ||
+            github.event.comment.author_association == 'MEMBER' ||
+            github.event.comment.author_association == 'COLLABORATOR'
+          ) &&
           (
             contains(github.event.comment.body, '/improve') ||
             contains(github.event.comment.body, '/review') ||
