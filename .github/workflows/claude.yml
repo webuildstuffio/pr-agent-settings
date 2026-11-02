@@ -1,4 +1,42 @@
-# Claude Code Assistant v5.28.8
+# Claude Code Assistant v5.28.10
+# v5.28.10 - (Nov 2 2026) Push identity, take two: mint the
+#          Claude App token BEFORE checkout and hand it to
+#          checkout as its token, so the credential checkout
+#          persists is the app token itself. v5.28.9's
+#          persist-credentials: false broke PR-mode runs: the
+#          action fetches the PR head SHA before it configures
+#          git auth, and with no persisted credential that fetch
+#          dies ("could not read Username for https://github.com")
+#          - proven live on howmuchwaterdoineed.com PR #443
+#          leg 2, run 41447736182. With the app token persisted
+#          by checkout, setup fetches work, and pushes
+#          authenticate as claude[bot] whichever credential git
+#          prefers (the includeIf.gitdir header and the action's
+#          rewritten remote URL now carry the same app token).
+#          The mint step performs the same OIDC exchange the
+#          action performs for itself (audience
+#          claude-code-github-action, Anthropic app-token
+#          exchange endpoint); the action still mints its own
+#          token as before. Rollback is restoring the v5.28.8
+#          checkout step (no token input, no mint step).
+# v5.28.9 - (Nov 2 2026) Fix branch-push identity: the checkout
+#          step now sets persist-credentials: false.
+#          actions/checkout v7 stores the GITHUB_TOKEN credential
+#          in a RUNNER_TEMP file wired into the repo git config via
+#          includeIf.gitdir entries. claude-code-action's
+#          replaceCheckoutCredentials clears only include.path
+#          entries, so the checkout AUTHORIZATION header survived,
+#          git preferred it over the action's app-token remote URL,
+#          and Claude's branch pushes authenticated as
+#          github-actions[bot] (proven live 2026-11-02 on
+#          howmuchwaterdoineed.com #442 leg 1: the pushed commit's
+#          GitHub author/committer resolved to github-actions[bot]
+#          despite the OIDC app-token exchange succeeding). With
+#          no persisted checkout credential, the action's app-token
+#          remote URL is the only git auth and pushes run as
+#          claude[bot], whose events trigger downstream workflows
+#          without action_required parking. Rollback is removing
+#          the persist-credentials line.
 # v5.28.8 - (Oct 31 2026) CLI cache pin 2.1.314 -> 2.1.316
 #          (checksum from Anthropic's release manifest; the pin
 #          check script flagged the drift, issue #146).
@@ -194,8 +232,40 @@ jobs:
             echo "issue_number=" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Mint Claude App token for checkout
+        id: claude-app-token
+        run: |
+          set -euo pipefail
+          # Same OIDC exchange the claude-code-action performs
+          # for itself (src/github/token.ts): job OIDC token ->
+          # Claude App installation token. Checkout below then
+          # persists THIS token instead of GITHUB_TOKEN, so
+          # every git operation in the job (the action's PR-head
+          # fetch and Claude's branch pushes alike) authenticates
+          # as claude[bot].
+          oidc_url="${ACTIONS_ID_TOKEN_REQUEST_URL}"
+          oidc_url="${oidc_url}&audience=claude-code-github-action"
+          oidc_resp=$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${oidc_url}")
+          oidc_token=$(printf '%s' "${oidc_resp}" | jq -r '.value // empty')
+          if [ -z "${oidc_token}" ]; then
+            echo "claude-app-token: OIDC token request failed" >&2
+            exit 1
+          fi
+          exchange="https://api.anthropic.com/api/github/github-app-token-exchange"
+          perms='{"permissions":{"contents":"write","pull_requests":"write","issues":"write","actions":"read"}}'
+          app_resp=$(curl -sS -X POST -H "Authorization: Bearer ${oidc_token}" -H "Content-Type: application/json" -d "${perms}" "${exchange}")
+          app_token=$(printf '%s' "${app_resp}" | jq -r '.token // .app_token // empty')
+          if [ -z "${app_token}" ]; then
+            echo "claude-app-token: app token exchange failed" >&2
+            exit 1
+          fi
+          echo "::add-mask::${app_token}"
+          echo "token=${app_token}" >> "${GITHUB_OUTPUT}"
+
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          token: ${{ steps.claude-app-token.outputs.token }}
 
       - name: Claude Lite bootstrap
         if: vars.CLAUDE_SETUP_PROFILE == 'agent' || vars.CLAUDE_SETUP_PROFILE == 'dev'
