@@ -1,4 +1,7 @@
-# Claude Code Assistant v5.28.7
+# Claude Code Assistant v5.28.8
+# v5.28.8 - (Oct 31 2026) CLI cache pin 2.1.314 -> 2.1.316
+#          (checksum from Anthropic's release manifest; the pin
+#          check script flagged the drift, issue #146).
 # v5.28.7 - (Oct 30 2026) Drop the explicit
 #          github_token: ${{ secrets.GITHUB_TOKEN }} from the
 #          claude-code-action step. With it passed, the action
@@ -798,17 +801,17 @@ jobs:
           path: |
             ~/.local/bin/claude
             ~/.local/share/claude
-          key: claude-cli-2.1.314-${{ runner.os }}-${{ runner.arch }}
+          key: claude-cli-2.1.316-${{ runner.os }}-${{ runner.arch }}
 
       - name: Resolve cached Claude Code CLI
         id: claude-bin
         run: |
           # The cache is agent-writable state, so a restored binary is
           # only used after its SHA256 matches the official Claude Code
-          # 2.1.314 linux-x64 release checksum (Anthropic manifest).
+          # 2.1.316 linux-x64 release checksum (Anthropic manifest).
           # Drift is watched by scripts/check-claude-cli-pin.sh (issue
           # #100); bump version + checksum together when it fires.
-          want="4487042b4c4f5d88d4568f68ae98aae0b1ffae58864cf57fb868641bc5f84594"
+          want="fd13c70000fec3f2116dfbcbb6121210b4a29328bf0e46210a59dd594a67d824"
           bin="$HOME/.local/bin/claude"
           hit="${{ steps.claude-cli-cache.outputs.cache-hit }}"
           got="$(sha256sum "$(readlink -f "$bin" 2>/dev/null)" 2>/dev/null | cut -d' ' -f1)"
