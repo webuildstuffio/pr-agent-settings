@@ -29,9 +29,13 @@ inputs:
     required: false
     default: ""
   mode:
-    description: "Tagging mode: dry-run or apply."
+    description: >-
+      Tagging mode: dry-run or apply. Empty (the default) falls
+      back to the caller's JEV_TAG_MODE job env, then to apply, so
+      a wiring that still sets the v2.x job-level env is honoured
+      instead of being silently overridden by an input default.
     required: false
-    default: apply
+    default: ""
   github-token:
     description: >-
       Token for the GitHub API calls (labels, sticky comment).
@@ -42,9 +46,10 @@ inputs:
     required: true
   mention-pat:
     description: >-
-      Optional owner PAT (JEV_MENTION_PAT): when set, the sticky
-      comment (and the Codex mention inside it) is authored by the
-      owner's account. Empty degrades to the workflow token.
+      Optional owner PAT: when set, the sticky comment (and the
+      Codex mention inside it) is authored by the owner's account.
+      Empty falls back to the caller's JEV_MENTION_PAT job env;
+      with neither set, everything runs on the workflow token.
     required: false
     default: ""
 runs:
@@ -55,8 +60,14 @@ runs:
       env:
         GITHUB_TOKEN: ${{ inputs.github-token }}
         OPENROUTER_API_KEY: ${{ inputs.openrouter-api-key }}
-        JEV_MENTION_PAT: ${{ inputs.mention-pat }}
-        JEV_TAG_MODE: ${{ inputs.mode }}
+        # The mode and mention-pat inputs land under distinct
+        # names, NOT the script's own env names: a step env entry
+        # would silently override any job-level JEV_TAG_MODE /
+        # JEV_MENTION_PAT the caller still sets (the v2.x wiring
+        # contract). The run block resolves them with fallbacks,
+        # the same pattern as pr-number / TARGET_PR below.
+        JEV_INPUT_MENTION_PAT: ${{ inputs.mention-pat }}
+        JEV_INPUT_MODE: ${{ inputs.mode }}
         JEV_EVENT_PR: ${{ inputs.pr-number }}
       run: |
         # Resolve the PR number in shell (same contract as the
@@ -69,6 +80,13 @@ runs:
           echo "No PR number available; skipping Jev tagging."
           exit 0
         fi
+        # Resolve mode and the mention PAT: explicit input wins,
+        # then the caller's job-level env (v2.x contract), then
+        # the built-in default (apply / no PAT).
+        mode="${JEV_INPUT_MODE:-${JEV_TAG_MODE:-apply}}"
+        if [ -n "${JEV_INPUT_MENTION_PAT:-}" ]; then
+          export JEV_MENTION_PAT="$JEV_INPUT_MENTION_PAT"
+        fi
         # No trailing "|| true" here (deliberate, v1.0.0):
         # jev_tag.main() already fails open internally for every
         # handled error (missing token, gather failure, model
@@ -79,4 +97,4 @@ runs:
         # failed "Jev tagging" check instead of passing silently.
         python3 "${{ github.action_path }}/jev_tag.py" \
           --repo "$GITHUB_REPOSITORY" \
-          --pr "$pr" --mode "$JEV_TAG_MODE"
+          --pr "$pr" --mode "$mode"
