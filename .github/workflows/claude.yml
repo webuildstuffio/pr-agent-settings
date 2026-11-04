@@ -1,4 +1,12 @@
-# Claude Code Assistant v5.28.10
+# Claude Code Assistant v5.28.11
+# v5.28.11 - (Nov 4 2026) Toolchain pins: claude-code-action
+#          v1.0.262 -> v1.0.268, CLI cache pin 2.1.316 ->
+#          2.1.318 (checksum from Anthropic's release
+#          manifest). The canonical copy had fallen behind
+#          the fleet it defines (31 repos already run
+#          v1.0.264); rollout to every adopter follows in
+#          the same wave, each repo keeping its pin form
+#          (tag or SHA).
 # v5.28.10 - (Nov 2 2026) Push identity, take two: mint the
 #          Claude App token BEFORE checkout and hand it to
 #          checkout as its token, so the credential checkout
@@ -871,17 +879,17 @@ jobs:
           path: |
             ~/.local/bin/claude
             ~/.local/share/claude
-          key: claude-cli-2.1.316-${{ runner.os }}-${{ runner.arch }}
+          key: claude-cli-2.1.318-${{ runner.os }}-${{ runner.arch }}
 
       - name: Resolve cached Claude Code CLI
         id: claude-bin
         run: |
           # The cache is agent-writable state, so a restored binary is
           # only used after its SHA256 matches the official Claude Code
-          # 2.1.316 linux-x64 release checksum (Anthropic manifest).
+          # 2.1.318 linux-x64 release checksum (Anthropic manifest).
           # Drift is watched by scripts/check-claude-cli-pin.sh (issue
           # #100); bump version + checksum together when it fires.
-          want="fd13c70000fec3f2116dfbcbb6121210b4a29328bf0e46210a59dd594a67d824"
+          want="708c77b204db30086ff6f1ed34577bda03e1be74ced80557cbf7b54249ebf0bd"
           bin="$HOME/.local/bin/claude"
           hit="${{ steps.claude-cli-cache.outputs.cache-hit }}"
           got="$(sha256sum "$(readlink -f "$bin" 2>/dev/null)" 2>/dev/null | cut -d' ' -f1)"
@@ -894,7 +902,7 @@ jobs:
       - name: Run Claude Code
         id: claude_action
         timeout-minutes: 45
-        uses: anthropics/claude-code-action@v1.0.262
+        uses: anthropics/claude-code-action@v1.0.268
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           path_to_claude_code_executable: ${{ steps.claude-bin.outputs.path }}
