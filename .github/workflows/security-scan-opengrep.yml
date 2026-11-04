@@ -75,7 +75,7 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.draft == false
-    runs-on: ubicloud-standard-2
+    runs-on: ${{ vars.CI_RUNNER || 'ubicloud-standard-2' }}
     timeout-minutes: 25
     concurrency:
       group: security-scan-opengrep-inner-${{ github.ref }}
