@@ -54,9 +54,19 @@ runs:
       run: |
         # Fail the step (and with it the caller's failure-check)
         # on a corrupt bundled toml, instead of letting pr-agent
-        # warn-and-skip it downstream. tomllib is Python 3.11+,
-        # present on the fleet runners (the Jev action's python3).
+        # warn-and-skip it downstream. tomllib is Python 3.11+;
+        # where the runner's python3 lacks it (or python3 itself
+        # is absent), validation is skipped with a warning rather
+        # than failing the step: a missing validator must not take
+        # down a config copy that already succeeded.
         dest="${{ github.workspace }}/.pr_agent.global.toml"
-        python3 -c "import tomllib, sys; tomllib.load(open(sys.argv[1], 'rb'))" "$dest" \
-          && echo "Global Qodo config: $dest parses as valid TOML" \
-          || { echo "::error::Bundled .pr_agent.toml is not valid TOML"; exit 1; }
+        if python3 -c "import tomllib" 2>/dev/null; then
+          if python3 -c "import tomllib, sys; tomllib.load(open(sys.argv[1], 'rb'))" "$dest"; then
+            echo "Global Qodo config: $dest parses as valid TOML"
+          else
+            echo "::error::Bundled .pr_agent.toml is not valid TOML"
+            exit 1
+          fi
+        else
+          echo "::warning::python3/tomllib unavailable on this runner; skipping TOML validation of $dest"
+        fi
