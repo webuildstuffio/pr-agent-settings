@@ -81,7 +81,11 @@ merge, so Jev can never pass silently or block Qodo again.
 ## Updating
 
 Edit the script here, merge, then bump the pinned SHA in each wired
-repo's `qodo-review.yml` `uses:` line to the new main commit. The
+repo's `qodo-review.yml` `uses:` line to the new main commit. One
+exception: this repo's own wiring pins the SHA in a checkout `ref:`
+and references the action by local path (`./.jev-pinned/jev`),
+because a workflow cannot download its own repo's action archive
+(the codeload fetch 404s at a valid SHA; proven 2026-11-04). The
 packaging carries its own version note (the header comment in
 `jev/action.yml`, currently jev-action v1.0.0; packaging changes bump
 it, decision-logic changes do not). The step carries a
