@@ -1,0 +1,100 @@
+# jev-action v1.0.0 (2026-11-04)
+#
+# Composite-action packaging of the Jev PR tagging step (jev-tag
+# v2.1.0 logic in jev_tag.py / jev_lib.py, unchanged). Replaces the
+# v2.x raw.githubusercontent curl + SHA256 digest load: when
+# pr-agent-settings went private, that unauthenticated fetch began
+# returning 404 and the step's fail-open design absorbed it
+# silently, so Jev processed nothing fleet-wide from 2026-11-01
+# 16:41Z until this fix (pr-agent-settings#42). Wired repos now
+# load this action with `uses:` at a full 40-char commit SHA,
+# served to the job's own GITHUB_TOKEN under this repo's
+# organization Actions access level; the full-SHA pin is the
+# integrity mechanism, so the runtime digest check is retired.
+# Version history: v1.0.0 initial packaging, no decision-logic
+# change; sticky marker format and label logic identical to
+# jev-tag v2.1.0.
+name: Jev PR tagging
+description: >-
+  Layer 1 path rules plus one Jev Decisions API request label the
+  PR and its linked issue, and render a Codex security review
+  trigger in the sticky comment when the band fires.
+inputs:
+  pr-number:
+    description: >-
+      PR number for pull_request events. Leave empty on
+      workflow_dispatch runs: the step falls back to the TARGET_PR
+      environment variable exported by the caller's setup step,
+      exactly as the pre-action shell wiring did.
+    required: false
+    default: ""
+  mode:
+    description: >-
+      Tagging mode: dry-run or apply. Empty (the default) falls
+      back to the caller's JEV_TAG_MODE job env, then to apply, so
+      a wiring that still sets the v2.x job-level env is honoured
+      instead of being silently overridden by an input default.
+    required: false
+    default: ""
+  github-token:
+    description: >-
+      Token for the GitHub API calls (labels, sticky comment).
+      Pass the job GITHUB_TOKEN.
+    required: true
+  openrouter-api-key:
+    description: OpenRouter API key for the Jev Decisions request.
+    required: true
+  mention-pat:
+    description: >-
+      Optional owner PAT: when set, the sticky comment (and the
+      Codex mention inside it) is authored by the owner's account.
+      Empty falls back to the caller's JEV_MENTION_PAT job env;
+      with neither set, everything runs on the workflow token.
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Tag PR with Jev
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        OPENROUTER_API_KEY: ${{ inputs.openrouter-api-key }}
+        # The mode and mention-pat inputs land under distinct
+        # names, NOT the script's own env names: a step env entry
+        # would silently override any job-level JEV_TAG_MODE /
+        # JEV_MENTION_PAT the caller still sets (the v2.x wiring
+        # contract). The run block resolves them with fallbacks,
+        # the same pattern as pr-number / TARGET_PR below.
+        JEV_INPUT_MENTION_PAT: ${{ inputs.mention-pat }}
+        JEV_INPUT_MODE: ${{ inputs.mode }}
+        JEV_EVENT_PR: ${{ inputs.pr-number }}
+      run: |
+        # Resolve the PR number in shell (same contract as the
+        # pre-action wiring): the event PR wins; workflow_dispatch
+        # runs fall back to TARGET_PR, exported into the job env by
+        # the caller's github-script setup step.
+        pr="$JEV_EVENT_PR"
+        if [ -z "$pr" ]; then pr="$TARGET_PR"; fi
+        if [ -z "$pr" ]; then
+          echo "No PR number available; skipping Jev tagging."
+          exit 0
+        fi
+        # Resolve mode and the mention PAT: explicit input wins,
+        # then the caller's job-level env (v2.x contract), then
+        # the built-in default (apply / no PAT).
+        mode="${JEV_INPUT_MODE:-${JEV_TAG_MODE:-apply}}"
+        if [ -n "${JEV_INPUT_MENTION_PAT:-}" ]; then
+          export JEV_MENTION_PAT="$JEV_INPUT_MENTION_PAT"
+        fi
+        # No trailing "|| true" here (deliberate, v1.0.0):
+        # jev_tag.main() already fails open internally for every
+        # handled error (missing token, gather failure, model
+        # failure -> degraded sticky) and returns 0. A non-zero
+        # exit therefore means the script could not run at all
+        # (missing interpreter or files), which must fail the step
+        # so the caller's failure-visibility step can post the
+        # failed "Jev tagging" check instead of passing silently.
+        python3 "${{ github.action_path }}/jev_tag.py" \
+          --repo "$GITHUB_REPOSITORY" \
+          --pr "$pr" --mode "$mode"

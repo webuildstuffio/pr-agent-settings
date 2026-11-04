@@ -44,26 +44,39 @@ removes after the step applied them are never re-added on that PR
 clamped by repo tier; the step fails open (warning + exit 0) so it can
 never break the Qodo job.
 
-## Why the script lives here
+## How wired repos load the script
 
-This repo is public by design (the default `GITHUB_TOKEN` must be able
-to read the org's review config). A workflow job's `GITHUB_TOKEN` is
-scoped to its own repository, so it cannot fetch code from private
-fleet repos such as `gh-actions-and-skills`. Pilot workflows therefore
-fetch these files over their raw URLs at a pinned commit SHA:
+Since jev-action v1.0.0 (2026-11-04), the step is packaged as a
+composite action (`jev/action.yml` in this repo) and wired repos load
+it by full commit SHA:
 
-```sh
-base="https://raw.githubusercontent.com/webuildstuffio/pr-agent-settings/<SHA>/jev"
-curl -fsSL "$base/jev_lib.py" -o /tmp/jev_lib.py
-curl -fsSL "$base/jev_tag.py" -o /tmp/jev_tag.py
-python3 /tmp/jev_tag.py --repo "$GITHUB_REPOSITORY" --pr "$PR" \
-  --mode "$JEV_TAG_MODE"
+```yaml
+uses: webuildstuffio/pr-agent-settings/jev@<full-40-char-SHA>
 ```
+
+This repo's Actions access level is set to `organization`, so a job
+in any org repo can load the action with its own `GITHUB_TOKEN` even
+though the repo is private. The full-SHA pin is the integrity
+mechanism.
+
+History: the v1/v2 wiring fetched the two files over their
+`raw.githubusercontent.com` URLs at a pinned SHA and verified SHA256
+digests before executing. That only worked while this repo was
+public; once it went private the fetch returned 404, the step's
+fail-open design absorbed the error silently, and Jev processed
+nothing fleet-wide from 2026-11-01 16:41Z until the v1.0.0 packaging
+fix (issue #42). The digest check retired with the raw fetch. The
+wiring also gained a failure-visibility step: if the Jev step fails,
+a follow-up step posts a failed `Jev tagging` check run on the PR
+head SHA, so a load failure can never pass silently again.
 
 ## Updating
 
 Edit the script here, merge, then bump the pinned SHA in each wired
-repo's `qodo-review.yml` to the new main commit. The step carries a
+repo's `qodo-review.yml` `uses:` line to the new main commit. The
+packaging carries its own version note (the header comment in
+`jev/action.yml`, currently jev-action v1.0.0; packaging changes bump
+it, decision-logic changes do not). The step carries a
 version (`VERSION` in `jev_lib.py`, currently v2.1.0; the v1 to v2
 jump marks the warrant gate plus the paths-only Layer 1, whose
 decisions are not comparable to v1 runs; v2.0.1 tokenizes dotted
