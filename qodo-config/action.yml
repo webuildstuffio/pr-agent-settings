@@ -1,0 +1,72 @@
+# qodo-config v1.0.0 (2026-11-04)
+#
+# Delivers the org-global Qodo pr-agent configuration (the
+# .pr_agent.toml at this repo's root) into a caller job's workspace.
+#
+# Why this exists: pr-agent's own global fetch
+# (config.global_settings_repo) reads that file through the GitHub
+# API with the CALLER repo's GITHUB_TOKEN. Since pr-agent-settings
+# went private (2026-11-01), that token has no access: the contents
+# fetch 404s and pr-agent silently runs on upstream defaults,
+# logging only a DEBUG line ("No accessible organization global
+# .pr_agent.toml; using local settings only", github_provider
+# _fetch_global_repo_settings in pr-agent v0.48.0). Every global
+# tuning key not duplicated in the workflow env block (repo context
+# files, extra instructions, per-file suggestion cap,
+# publish_output_no_suggestions, the [ignore] globs, /review
+# behaviour) was dropped fleet-wide from 2026-11-01 until this fix.
+#
+# Transport is the same one the Jev action uses: wired repos load
+# this action with `uses:` at a full 40-char commit SHA, served to
+# the job's own GITHUB_TOKEN under this repo's organization Actions
+# access level. The action copies the bundled toml to
+# .pr_agent.global.toml in the caller workspace, and the wiring
+# points pr-agent at it via config.extra_config_url
+# ("/github/workspace/.pr_agent.global.toml", the workspace mount
+# path inside the pr-agent Docker container).
+#
+# Precedence inside pr-agent v0.48.0 (apply_repo_settings ->
+# apply_host_settings, then repo settings, then env re-applied
+# last): built-in defaults < extra config (this file) < per-repo
+# .pr_agent.toml < workflow env. So this restores the global layer
+# without weakening per-repo overrides or the env block.
+name: Qodo global config
+description: >-
+  Copies the org-global .pr_agent.toml bundled in pr-agent-settings
+  into the caller workspace as .pr_agent.global.toml, for pr-agent
+  to load via config.extra_config_url.
+runs:
+  using: composite
+  steps:
+    - name: Copy global .pr_agent.toml into workspace
+      shell: bash
+      run: |
+        src="${{ github.action_path }}/../.pr_agent.toml"
+        dest="${{ github.workspace }}/.pr_agent.global.toml"
+        if [ ! -f "$src" ]; then
+          echo "::error::Bundled .pr_agent.toml not found at $src"
+          exit 1
+        fi
+        cp "$src" "$dest"
+        echo "Global Qodo config: copied $src -> $dest ($(wc -c < "$dest") bytes)"
+    - name: Validate copied TOML syntax
+      shell: bash
+      run: |
+        # Fail the step (and with it the caller's failure-check)
+        # on a corrupt bundled toml, instead of letting pr-agent
+        # warn-and-skip it downstream. tomllib is Python 3.11+;
+        # where the runner's python3 lacks it (or python3 itself
+        # is absent), validation is skipped with a warning rather
+        # than failing the step: a missing validator must not take
+        # down a config copy that already succeeded.
+        dest="${{ github.workspace }}/.pr_agent.global.toml"
+        if python3 -c "import tomllib" 2>/dev/null; then
+          if python3 -c "import tomllib, sys; tomllib.load(open(sys.argv[1], 'rb'))" "$dest"; then
+            echo "Global Qodo config: $dest parses as valid TOML"
+          else
+            echo "::error::Bundled .pr_agent.toml is not valid TOML"
+            exit 1
+          fi
+        else
+          echo "::warning::python3/tomllib unavailable on this runner; skipping TOML validation of $dest"
+        fi

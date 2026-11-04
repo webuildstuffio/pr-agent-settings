@@ -26,7 +26,7 @@ Org-wide AI code-review configuration for the webuildstuffio GitHub org. This re
 
 ## Non-negotiables
 
-1. **This repo MUST stay public.** The default `GITHUB_TOKEN` cannot read it as a private repo (404) — which *silently drops all global tuning* (temperature, score threshold, focus instructions) in every org repo's reviews.
+1. **This repo is private (since 2026-11-01); nothing may fetch from it unauthenticated or with a caller repo's `GITHUB_TOKEN`.** That token cannot read a private repo (404), and pr-agent's `config.global_settings_repo` fetch does exactly that — when the repo went private it *silently dropped all global tuning* (repo context files, extra instructions, per-file suggestion cap, `[ignore]` globs) in every org repo's reviews until 2026-11-04. Global tuning now travels via the `qodo-config/` composite action + `config.extra_config_url` (wiring v3.7.0), and Jev via the `jev/` composite action, both loaded with `uses:` at a pinned SHA under this repo's organization Actions access. The `global_settings_repo` env stays set as a fallback layer only; while the repo is private its 404 DEBUG log line is expected, not a fault.
 2. **Never set `openrouter/free` as primary model** — proven broken with pr-agent (silent no-reviews). Fallback position only.
 3. **Never route OpenRouter through the Cloudflare AI Gateway** — it corrupts streaming. Direct OpenRouter API only.
 4. **Keep this file under 300 lines** — it is injected into every pr-agent review prompt org-wide; everything past line 300 is invisible to reviewers.
