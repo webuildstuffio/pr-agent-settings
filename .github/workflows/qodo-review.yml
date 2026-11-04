@@ -222,6 +222,7 @@ jobs:
       issues: write
       pull-requests: write
       checks: write
+      contents: read
     name: Jev tagging
     steps:
       - name: Set PR for manual runs
@@ -240,9 +241,22 @@ jobs:
             if (prs.length) { core.exportVariable('TARGET_PR', prs[0].number); }
             else { core.setFailed('No open PRs'); }
 
+      # Self-hosting variant (this repo only): a workflow cannot
+      # download its own repo's action archive (the codeload fetch
+      # 404s even at a valid pinned SHA; proven 2026-11-04, folio
+      # and the backfill repos fetched the same tarball fine).
+      # So the pinned commit is checked out and the action is
+      # referenced by local path: same pin, different transport.
+      - name: Checkout pinned Jev action
+        uses: actions/checkout@v7
+        with:
+          repository: webuildstuffio/pr-agent-settings
+          ref: 5409839a33f0789d5388e275f82695ce3ec98bb5
+          path: .jev-pinned
+
       - name: Tag PR
         id: jev
-        uses: webuildstuffio/pr-agent-settings/jev@5409839a33f0789d5388e275f82695ce3ec98bb5
+        uses: ./.jev-pinned/jev
         with:
           pr-number: ${{ github.event.pull_request.number }}
           mode: ${{ vars.JEV_TAG_MODE || 'apply' }}
