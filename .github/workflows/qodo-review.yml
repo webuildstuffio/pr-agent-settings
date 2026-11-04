@@ -1,4 +1,4 @@
-# Qodo AI Code Suggestions v3.6.1
+# Qodo AI Code Suggestions v3.7.0
 # Inline code suggestions only — the highest-value, lowest-noise output.
 # All config lives in webuildstuffio/pr-agent-settings/.pr_agent.toml (global)
 # and per-repo .pr_agent.toml (overrides). This workflow is intentionally minimal.
@@ -11,12 +11,26 @@
 # retries 1, ai_timeout 180s per call, no same-model retry on timeout.
 # API: direct OpenRouter (no AI Gateway proxy — CF gateway corrupts streaming).
 # DO NOT use openrouter/free as primary — proven broken (silent no-reviews).
-# NOTE: webuildstuffio/pr-agent-settings MUST stay PUBLIC — the default
-# GITHUB_TOKEN cannot read it as a private repo (404), which silently drops
-# all global tuning (temperature, score threshold, focus instructions).
+# NOTE: webuildstuffio/pr-agent-settings is PRIVATE (since 2026-11-01).
+# pr-agent's config.global_settings_repo fetch reads it via the API with
+# the caller GITHUB_TOKEN, which 404s on a private repo — the global
+# .pr_agent.toml is therefore delivered by the qodo-config action +
+# config.extra_config_url instead (v3.7.0). The global_settings_repo env
+# stays set as a fallback layer; its 404 DEBUG log line is expected
+# while the repo is private, not a fault.
 # /review and /describe available via manual /command in PR comments.
 #
 # CHANGELOG:
+# v3.7.0: (Nov 4 2026) Global Qodo config restored after the
+#          pr-agent-settings privatization silently dropped it
+#          (2026-11-01 to 2026-11-04). New "Global Qodo config"
+#          step loads the qodo-config composite action
+#          (pr-agent-settings#45) and the pr-agent step loads the
+#          copied global .pr_agent.toml via
+#          config.extra_config_url. This repo's copy uses the
+#          self-host local-path variant, like its Jev job. Full
+#          changelog in the fleet template
+#          (qodo-rollout-2026-10-24/template-qodo-review.yml).
 # v3.6.1: (Nov 4 2026) Jev repackaged as a composite action and
 #          moved into its own "Jev tagging" job. Loading is now
 #          uses: webuildstuffio/pr-agent-settings/jev at a pinned
@@ -112,6 +126,7 @@ jobs:
     timeout-minutes: 15
     continue-on-error: true
     permissions:
+      checks: write
       issues: write
       pull-requests: write
       contents: read
@@ -177,12 +192,71 @@ jobs:
           check_var QODO_FALLBACK_3 "$QODO_FALLBACK_3"
           exit "$fail"
 
+      # Global Qodo config (wiring v3.7.0, self-hosting variant for
+      # pr-agent-settings itself): a workflow cannot download its
+      # own repo's action archive, so the pinned commit is checked
+      # out and the action is referenced by local path, the same
+      # transport swap as the Jev job below. See the standard
+      # wiring for why this step exists (private-repo 404 on
+      # pr-agent's global_settings_repo API fetch).
+      - name: Checkout pinned Qodo config action
+        uses: actions/checkout@v7
+        with:
+          repository: webuildstuffio/pr-agent-settings
+          ref: 72eccac3b473975585959eba86e37ae973229940
+          path: .qodo-config-pinned
+
+      - name: Global Qodo config
+        id: qodo_config
+        continue-on-error: true
+        uses: ./.qodo-config-pinned/qodo-config
+
+      # Failure visibility: if the config action failed to run,
+      # post a FAILED "Qodo global config" check on the PR head
+      # SHA. The suggestions step still runs (on upstream
+      # defaults), so a config outage degrades visibly instead of
+      # silently. A load failure of the action reference itself
+      # fails this job at preparation, which likewise surfaces as
+      # a failed job check rather than a silent pass.
+      - name: Qodo config failure check
+        if: >-
+          !cancelled() && steps.qodo_config.outcome == 'failure'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const fromEvent = context.payload.pull_request;
+            const prNumber = fromEvent?.number ?? context.payload.issue?.number ?? Number(process.env.TARGET_PR || 0);
+            let headSha = fromEvent?.head?.sha ?? '';
+            if (!headSha && prNumber) {
+              const { data: pr } = await github.rest.pulls.get({
+                owner: context.repo.owner, repo: context.repo.repo,
+                pull_number: prNumber
+              });
+              headSha = pr.head.sha;
+            }
+            if (!headSha) {
+              core.warning('Qodo config step failed but no PR head SHA is available; no check posted.');
+              return;
+            }
+            await github.rest.checks.create({
+              owner: context.repo.owner, repo: context.repo.repo,
+              name: 'Qodo global config',
+              head_sha: headSha,
+              status: 'completed',
+              conclusion: 'failure',
+              output: {
+                title: 'Qodo global config failed to load',
+                summary: 'The Global Qodo config step failed, so pr-agent ran without the org-global .pr_agent.toml (upstream defaults only). See the "Global Qodo config" step log in the Code Suggestions job of this workflow run.'
+              }
+            });
+
       - name: Run Qodo /improve
         uses: docker://pragent/pr-agent@sha256:80edef71baa3df28c129d858d4b53784abfc14704c235efb32b6c461d5399a6d # v0.48.0-github_action
         env:
           OPENROUTER__KEY: ${{ secrets.QODO_OPENROUTER_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           config.global_settings_repo: "pr-agent-settings"
+          config.extra_config_url: "/github/workspace/.pr_agent.global.toml"
           config.model: >-
             ${{ vars.QODO_MODEL ||
             'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free' }}
