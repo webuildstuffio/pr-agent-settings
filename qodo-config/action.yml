@@ -49,3 +49,14 @@ runs:
         fi
         cp "$src" "$dest"
         echo "Global Qodo config: copied $src -> $dest ($(wc -c < "$dest") bytes)"
+    - name: Validate copied TOML syntax
+      shell: bash
+      run: |
+        # Fail the step (and with it the caller's failure-check)
+        # on a corrupt bundled toml, instead of letting pr-agent
+        # warn-and-skip it downstream. tomllib is Python 3.11+,
+        # present on the fleet runners (the Jev action's python3).
+        dest="${{ github.workspace }}/.pr_agent.global.toml"
+        python3 -c "import tomllib, sys; tomllib.load(open(sys.argv[1], 'rb'))" "$dest" \
+          && echo "Global Qodo config: $dest parses as valid TOML" \
+          || { echo "::error::Bundled .pr_agent.toml is not valid TOML"; exit 1; }
