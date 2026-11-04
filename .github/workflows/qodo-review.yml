@@ -87,7 +87,7 @@ jobs:
           )
         )
       }}
-    runs-on: ubicloud-standard-2
+    runs-on: ${{ vars.CI_RUNNER || 'ubicloud-standard-2' }}
     # 15, not 8 (v3.5): a run makes several pr-agent tool calls, each
     # with its own fallback chain at ai_timeout 180s; the old cap could
     # kill the job mid-run on a slow day. The cap only binds in that
