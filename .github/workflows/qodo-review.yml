@@ -1,4 +1,4 @@
-# Qodo AI Code Suggestions v3.5
+# Qodo AI Code Suggestions v3.6.1
 # Inline code suggestions only — the highest-value, lowest-noise output.
 # All config lives in webuildstuffio/pr-agent-settings/.pr_agent.toml (global)
 # and per-repo .pr_agent.toml (overrides). This workflow is intentionally minimal.
@@ -17,6 +17,23 @@
 # /review and /describe available via manual /command in PR comments.
 #
 # CHANGELOG:
+# v3.6.1: (Nov 4 2026) Jev repackaged as a composite action and
+#          moved into its own "Jev tagging" job. Loading is now
+#          uses: webuildstuffio/pr-agent-settings/jev at a pinned
+#          full SHA with the job GITHUB_TOKEN under that repo's
+#          organization Actions access (jev-action v1.0.0,
+#          pr-agent-settings#42), replacing the raw.githubusercontent
+#          curl + SHA256 load that 404ed silently once
+#          pr-agent-settings went private (fleet outage 2026-11-01
+#          to 2026-11-04). The job split matters: a uses: reference
+#          resolves when its job is prepared, so as a step inside
+#          suggest an unresolvable pin failed the whole suggest job
+#          before Qodo ran (probe folio-app#3233). As its own job,
+#          a load failure fails only that job and surfaces as a
+#          failed "Jev tagging" check on the PR; a step-level
+#          failure posts the same check via the API. Same jev-tag
+#          v2.1.0 logic and env contract; the job is
+#          continue-on-error and never gates a merge.
 # v3.5.1: (Oct 28 2026) Gate the issue_comment trigger on the comment
 #          author's association (OWNER / MEMBER / COLLABORATOR) so only
 #          trusted commenters can trigger paid-model runs via /improve,
@@ -126,54 +143,6 @@ jobs:
         with:
           persist-credentials: false
 
-      # Jev tagging pilot (2026-10-27): Layer 1 rules + one Jev
-      # Decisions API request label the PR and its linked issue,
-      # and request a Codex security review when the band fires.
-      # Script home: webuildstuffio/pr-agent-settings/jev (public,
-      # pinned by SHA). Mode: JEV_TAG_MODE repo var (dry-run|apply).
-      # jev-tag v2.1.0
-      - name: Jev PR tagging
-        continue-on-error: true
-        if: >-
-          !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          OPENROUTER_API_KEY: ${{ secrets.QODO_OPENROUTER_API_KEY }}
-          JEV_MENTION_PAT: ${{ secrets.JEV_MENTION_PAT }}
-          JEV_TAG_MODE: ${{ vars.JEV_TAG_MODE || 'apply' }}
-          JEV_EVENT_PR: ${{ github.event.pull_request.number }}
-        run: |
-          # Resolve the PR number in shell: the env context is not
-          # available inside a step's own env: block, so referencing
-          # env.TARGET_PR there silently yields empty on
-          # workflow_dispatch runs. TARGET_PR (exported by the
-          # github-script step above) reaches this script as a plain
-          # environment variable, which is the reliable channel.
-          pr="$JEV_EVENT_PR"
-          if [ -z "$pr" ]; then pr="$TARGET_PR"; fi
-          if [ -z "$pr" ]; then
-            echo "No PR number available; skipping Jev tagging."
-            exit 0
-          fi
-          base="https://raw.githubusercontent.com/webuildstuffio"
-          base="$base/pr-agent-settings"
-          base="$base/e460f9cd1292fe59f84dca9f1785f1f047abbaa5/jev"
-          curl -fsSL "$base/jev_lib.py" -o /tmp/jev_lib.py
-          curl -fsSL "$base/jev_tag.py" -o /tmp/jev_tag.py
-          # Execute only content matching the pinned SHA256 digests
-          # below; a mismatch skips tagging without failing the job.
-          lib_sha="faee999935a93576a9dc1a9a2cb62a51b9f18ddb2d7d8e24fc65b5810b2f6f02"
-          tag_sha="92ab17eed5922bc1d4a53fb2a6baa9bb71d3dfc944d115f37f2b38c29485ead0"
-          verified=1
-          echo "$lib_sha  /tmp/jev_lib.py" | sha256sum -c - > /dev/null || verified=0
-          echo "$tag_sha  /tmp/jev_tag.py" | sha256sum -c - > /dev/null || verified=0
-          if [ "$verified" != "1" ]; then
-            echo "::error::Jev script checksum mismatch; tagging skipped."
-            exit 0
-          fi
-          python3 /tmp/jev_tag.py --repo "$GITHUB_REPOSITORY" \
-            --pr "$pr" --mode "$JEV_TAG_MODE" || true
-
       - name: Validate Qodo model variables
         env:
           QODO_MODEL: >-
@@ -228,3 +197,94 @@ jobs:
           github_action_config.auto_improve: "true"
           github_action_config.auto_review: "false"
           github_action_config.auto_describe: "false"
+  # Jev tagging (jev-tag v2.1.0 / jev-action v1.0.0): Layer 1
+  # rules + one Jev Decisions API request label the PR and its
+  # linked issue, and request a Codex security review when the
+  # band fires. Its own job since v3.6.1, never a step inside
+  # suggest: a uses: reference is resolved when its job is
+  # prepared, before any step runs, so a Jev load failure can
+  # only ever fail this job, never the suggestions.
+  jev:
+    if: >-
+      ${{
+        (
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.draft == false &&
+          github.event.pull_request.user.login != 'dependabot[bot]' &&
+          !startsWith(github.event.pull_request.head.ref, 'dependabot/')
+        ) ||
+        (github.event_name == 'workflow_dispatch')
+      }}
+    runs-on: ubicloud-standard-2
+    timeout-minutes: 10
+    continue-on-error: true
+    permissions:
+      issues: write
+      pull-requests: write
+      checks: write
+    name: Jev tagging
+    steps:
+      - name: Set PR for manual runs
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/github-script@v9
+        env:
+          PR_NUMBER: ${{ github.event.inputs.pr_number }}
+        with:
+          script: |
+            const n = process.env.PR_NUMBER ?? '';
+            if (n) { core.exportVariable('TARGET_PR', n); return; }
+            const { data: prs } = await github.rest.pulls.list({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', sort: 'updated', direction: 'desc', per_page: 1
+            });
+            if (prs.length) { core.exportVariable('TARGET_PR', prs[0].number); }
+            else { core.setFailed('No open PRs'); }
+
+      - name: Tag PR
+        id: jev
+        uses: webuildstuffio/pr-agent-settings/jev@5409839a33f0789d5388e275f82695ce3ec98bb5
+        with:
+          pr-number: ${{ github.event.pull_request.number }}
+          mode: ${{ vars.JEV_TAG_MODE || 'apply' }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          openrouter-api-key: ${{ secrets.QODO_OPENROUTER_API_KEY }}
+          mention-pat: ${{ secrets.JEV_MENTION_PAT }}
+
+      # Failure visibility: a step-level failure posts a FAILED
+      # "Jev tagging" check on the PR head SHA. A load failure
+      # never reaches this step: it fails the job at preparation,
+      # which itself surfaces as the failed "Jev tagging" job
+      # check. Model-call failures do not land here either:
+      # jev_tag fails open internally and still posts its
+      # degraded sticky.
+      - name: Jev failure check
+        if: >-
+          !cancelled() && steps.jev.outcome == 'failure'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const fromEvent = context.payload.pull_request;
+            const prNumber = fromEvent?.number ?? Number(process.env.TARGET_PR || 0);
+            let headSha = fromEvent?.head?.sha ?? '';
+            if (!headSha && prNumber) {
+              const { data: pr } = await github.rest.pulls.get({
+                owner: context.repo.owner, repo: context.repo.repo,
+                pull_number: prNumber
+              });
+              headSha = pr.head.sha;
+            }
+            if (!headSha) {
+              core.warning('Jev step failed but no PR head SHA is available; no check posted.');
+              return;
+            }
+            await github.rest.checks.create({
+              owner: context.repo.owner, repo: context.repo.repo,
+              name: 'Jev tagging',
+              head_sha: headSha,
+              status: 'completed',
+              conclusion: 'failure',
+              output: {
+                title: 'Jev tagging failed to run',
+                summary: 'The Jev tagging step failed before completing, so this PR has no Jev labels and no Codex security trigger. See the "Tag PR" step log in the Jev tagging job of this workflow run.'
+              }
+            });
