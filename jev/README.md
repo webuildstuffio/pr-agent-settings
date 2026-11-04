@@ -2,9 +2,11 @@
 
 `jev_tag.py` is the fleet's Jev decision-model tagging step (decision
 logic in `jev_lib.py`, imported by it; offline checks in
-`jev_tag_test.py`). It runs first in the `qodo-review.yml` `suggest`
-job in wired repos (Jev-first standard, 2026-10-28), so its labels,
-security trigger, and sticky comment land before the pr-agent run:
+`jev_tag_test.py`). It runs as its own `Jev tagging` job in wired
+repos' `qodo-review.yml` (wiring v3.6.1; it was the first step of
+the `suggest` job until the job split below), in parallel with the
+pr-agent job, so its labels, security trigger, and sticky comment
+land independently of the suggestions run:
 
 1. Gathers PR state (PR text, changed files, linked issue, repo tier
    from the `rr-tier` property, README + AGENTS.md excerpts).
@@ -66,14 +68,24 @@ public; once it went private the fetch returned 404, the step's
 fail-open design absorbed the error silently, and Jev processed
 nothing fleet-wide from 2026-11-01 16:41Z until the v1.0.0 packaging
 fix (issue #42). The digest check retired with the raw fetch. The
-wiring also gained a failure-visibility step: if the Jev step fails,
-a follow-up step posts a failed `Jev tagging` check run on the PR
-head SHA, so a load failure can never pass silently again.
+wiring (template v3.6.1) also moved Jev out of the `suggest` job
+into its own job: a `uses:` reference resolves when its job is
+prepared, before any step runs, so as a step an unresolvable pin
+failed the whole Qodo job at preparation and no suggestion ever
+ran (probe folio-app#3233). As its own job, a load failure fails
+only that job and surfaces on the PR as a failed `Jev tagging`
+check; a step-level failure posts the same check via the API from
+a follow-up step. The job is continue-on-error and never gates a
+merge, so Jev can never pass silently or block Qodo again.
 
 ## Updating
 
 Edit the script here, merge, then bump the pinned SHA in each wired
-repo's `qodo-review.yml` `uses:` line to the new main commit. The
+repo's `qodo-review.yml` `uses:` line to the new main commit. One
+exception: this repo's own wiring pins the SHA in a checkout `ref:`
+and references the action by local path (`./.jev-pinned/jev`),
+because a workflow cannot download its own repo's action archive
+(the codeload fetch 404s at a valid SHA; proven 2026-11-04). The
 packaging carries its own version note (the header comment in
 `jev/action.yml`, currently jev-action v1.0.0; packaging changes bump
 it, decision-logic changes do not). The step carries a
