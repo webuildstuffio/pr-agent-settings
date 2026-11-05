@@ -29,6 +29,14 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+# Explicit per this repo's workflow convention (the vendored
+# file declared the same). The reusable declares no job
+# permissions of its own and needs nothing beyond this: it
+# checks out and reads files, annotates via workflow commands,
+# and ingests with its own token, not the caller's.
+permissions:
+  contents: read
+
 jobs:
   fast:
     if: >-
