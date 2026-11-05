@@ -1,0 +1,69 @@
+---
+# Snyk replacement: per-PR fast secret+vulnerability scan plus a
+# weekly Trivy deep scan. Logic lives in the reusable workflow;
+# this file is just the triggers.
+# Reusable: webuildstuffio/repo-review
+#   .github/workflows/security-scan-reusable.yml@b33359a3c87c071ed564b40cc6987597d5a45f92
+#
+# This caller replaces the vendored security-scan-opengrep.yml
+# (removed in the same change, 2026-11-05). The vendored copy
+# existed only because this repo was public and public repos
+# cannot call the private repo-review reusable (GitHub 422).
+# The repo is private now, so the standard fleet caller applies
+# directly. The vendored copy had also fallen behind the
+# reusable (v1.9.0 semantics vs v1.13.2 at the pin below), and
+# this repo had no Betterleaks or osv-scanner coverage at all;
+# the caller adds both, plus dashboard ingest. The Opengrep
+# p/ci gate stays on (opengrep_gate: true), matching the
+# enforcement the vendored file applied on PRs.
+
+name: security-scan
+"on":
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  schedule:
+    - cron: "0 9 * * 1" # Mondays 09:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+# Explicit per this repo's workflow convention (the vendored
+# file declared the same). The reusable declares no job
+# permissions of its own and needs nothing beyond this: it
+# checks out and reads files, annotates via workflow commands,
+# and ingests with its own token, not the caller's.
+permissions:
+  contents: read
+
+jobs:
+  fast:
+    if: >-
+      github.event_name == 'pull_request_target' && github.event.pull_request.draft == false
+    uses: webuildstuffio/repo-review/.github/workflows/security-scan-reusable.yml@b33359a3c87c071ed564b40cc6987597d5a45f92 # yamllint disable-line
+    with:
+      # Opengrep SAST (repo-review#354): gate tier blocks on new
+      # ERRORs in the diff, as the vendored file did; breadth
+      # and zizmor report-only.
+      opengrep: true
+      opengrep_gate: true
+      zizmor: true
+    # `inherit`, never a named secret: the reusable declares no
+    # workflow_call secrets, and passing one by name fails
+    # workflow validation at startup (fleet-wide gate outage
+    # 2026-10-28).
+    # nosemgrep: yaml.github-actions.security.secrets-inherit.secrets-inherit
+    secrets: inherit
+
+  deep:
+    if: >-
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    uses: webuildstuffio/repo-review/.github/workflows/security-scan-reusable.yml@b33359a3c87c071ed564b40cc6987597d5a45f92
+    with:
+      deep: true
+      # The vendored file's weekly run was a full Opengrep
+      # scan; opengrep_deep keeps that leg in the reusable.
+      opengrep_deep: true
+    # nosemgrep: yaml.github-actions.security.secrets-inherit.secrets-inherit
+    secrets: inherit
