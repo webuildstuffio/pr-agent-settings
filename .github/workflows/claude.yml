@@ -1,291 +1,8 @@
-# Claude Code Assistant v5.28.20
-# v5.28.20 - (Nov 6 2026) GLM model wiring through org vars:
-#          the model slots now follow the z.ai documented
-#          Claude Code configuration instead of Claude model
-#          names (every claude-* name is served by
-#          GLM-5.3-Flash on the z.ai endpoint, so the flagship
-#          never ran). ANTHROPIC_MODEL and the opus/sonnet
-#          slots resolve to vars.CLAUDE_MODEL (default
-#          glm-5.3[1m]); the haiku slot and the small/fast
-#          model resolve to vars.CLAUDE_SMALL_MODEL (default
-#          glm-5.3-flash[1m]); the [1m] suffix plus
-#          CLAUDE_CODE_AUTO_COMPACT_WINDOW (vars-driven,
-#          default 1000000) enables the 1M context window;
-#          CLAUDE_CODE_MAX_OUTPUT_TOKENS is 128000;
-#          API_TIMEOUT_MS is vars-driven (default 1200000, a
-#          per-call ceiling, separate from the retry count);
-#          --fallback-model and --effort are vars-driven the
-#          same way (CLAUDE_EFFORT default max, the level z.ai
-#          recommends for coding). Changing models, effort or
-#          timeouts is now an org-variable edit, no template
-#          change or rollout needed.
-# v5.28.19 - (Nov 6 2026) Full-SHA pinning for first-party
-#          actions (repo-review #696, owner-approved): every
-#          version-tag pin in this template moves to its full
-#          40-char SHA, with the version kept as a trailing
-#          comment (actions/checkout@<sha> # v7), matching
-#          the pinning already used for org reusables. Same
-#          pass in qodo-review.yml v3.8.1, the repo templates
-#          and then every adopter repo.
-# v5.28.18 - (Nov 6 2026) Remove the dead Claude CLI cache
-#          (repo-review #687). Every trigger this workflow has
-#          runs with cache mode read (verified in the job setup
-#          log of live runs, 2026-11-06), and the fleet cache
-#          list holds zero claude-cli entries in every sampled
-#          repo: the actions/cache step could never save, so
-#          each run paid a restore miss for config that only
-#          pretended to cache. The Cache and Resolve steps and
-#          the path_to_claude_code_executable input are gone;
-#          claude-code-action installs its own bundled CLI.
-#          The CLI pin check existed only to govern this
-#          cache pin, so scripts/check-claude-cli-pin.sh and
-#          the claude-cli-pin-check workflow are removed with
-#          it, and the check-registry entry records the
-#          removal. Same pass in qodo-review.yml v3.7.1: the
-#          Docker cache step is removed (zero qodo-docker
-#          cache entries fleet-wide; /var/lib/docker is not a
-#          portable cache path on ephemeral runners).
-# v5.28.17 - (Nov 5 2026) The lite bootstrap stops checking
-#          shell-config out. The v5.28.16 design read the
-#          pinned shell-config checkout with the Claude App
-#          token, but that token is scoped to the repo the
-#          run operates in, so the checkout fails in adopter
-#          repos. The bootstrap now calls shell-config's
-#          agent-tools composite action at the pinned commit
-#          recorded in check-registry.yml
-#          (uses: webuildstuffio/shell-config/.github/
-#          actions/agent-tools@<sha>, bin-dir input
-#          ~/.claude-lite/bin): composite actions follow the
-#          source repo's Actions access policy (shell-config
-#          is set to organization, the repo-review pattern),
-#          not the caller's token, so no cross-repo read
-#          credential is involved. The action runs the same
-#          agents-preset tools-only install and asserts the
-#          three binaries itself; the bootstrap keeps its own
-#          fail-closed assertion before hooks and probes run.
-# v5.28.16 - (Nov 5 2026) The lite bootstrap stops carrying
-#          hand-copied opengrep, betterleaks and hyperfine
-#          pins. A new step checks out
-#          webuildstuffio/shell-config at a pinned commit
-#          (read with the Claude App token minted above) and
-#          the bootstrap runs shell-config's tools-only
-#          install for its agents preset (install.sh
-#          --agent-tools with SHELL_CONFIG_PRESET set to
-#          agents) with SC_BIN_DIR=$LITE/bin. The three
-#          tools' version and checksum pins now live in
-#          shell-config's installers, where the local
-#          surface already uses them; check-registry.yml
-#          records the pinned shell-config ref instead of
-#          per-tool pins and the drift lint covers the new
-#          shape. The bootstrap still fails closed: it
-#          asserts all three binaries landed in $LITE/bin
-#          before hooks and probes run. New runtime
-#          dependency: the Claude App token must be able to
-#          read shell-config from adopter repos (the app
-#          is installed on shell-config itself; a one-repo
-#          pilot verifies this at rollout time). Rollout to
-#          adopter repos is a separate owner-approved wave,
-#          not part of this template change.
-# v5.28.15 - (Nov 5 2026) hyperfine 2.0.0 joins the lite
-#          bootstrap (agent and dev profiles): the pinned
-#          release tarball and binary are SHA256-verified
-#          before install, same pattern as opengrep and
-#          betterleaks, and $LITE/bin is added to GITHUB_PATH
-#          so the agent can call hyperfine by name for
-#          benchmark work (Bash(hyperfine:*) allowlisted).
-#          Timing numbers are only comparable when the
-#          measuring tool is identical everywhere; the pin
-#          matches shell-config's core-tool install. The
-#          check-registry gains the matching tools entry and
-#          the drift lint covers the pin. Rollout to adopter
-#          repos is a separate owner-approved wave, not part
-#          of this template change.
-# v5.28.14 - (Nov 5 2026) Pre-push gate fails closed on an
-#          unresolvable range (muse-tools audit issue 91): the
-#          claude-lite pre-push hook diffed the branch against
-#          the remote tip inside a process substitution, so a
-#          remote tip missing from the local clone (fresh
-#          worktree, shallow fetch, moved remote) made the diff
-#          fail invisibly, the changed-file list came back
-#          empty, and the opengrep gate silently scanned
-#          nothing. The hook now verifies the remote tip
-#          resolves (cat-file), fetches it when missing, blocks
-#          the push when it still cannot resolve, and captures
-#          the diff through a checked temp file; betterleaks
-#          only runs on a verified range.
-# v5.28.13 - (Nov 5 2026) Bot-author guard on the trigger: the
-#          comment and review clauses of the job if: now require
-#          a non-Bot author. Review bots quote the trigger line
-#          when reviewing this file, and claude[bot]'s own
-#          comments can carry the trigger string; either one
-#          re-entered the concurrency group and cancelled the
-#          in-flight run (self-cancellation loop, audit issue
-#          149 item 2). Human triggers are unchanged.
-# v5.28.12 - (Nov 4 2026) Runner names from GitHub variables:
-#          both jobs resolve the CI_RUNNER org variable with an
-#          in-YAML ubicloud-standard-2 fallback, matching the
-#          fleet runner-variable standard proven on
-#          repo-template-vite PR 175 and rolled out fleet-wide
-#          the same day (templates, repo-review reusables, then
-#          every adopter repo). Swapping runner providers is now
-#          a variable change, not a fleet-wide template rollout.
-# v5.28.11 - (Nov 4 2026) Toolchain pins: claude-code-action
-#          v1.0.262 -> v1.0.268, CLI cache pin 2.1.316 ->
-#          2.1.318 (checksum from Anthropic's release
-#          manifest). The canonical copy had fallen behind
-#          the fleet it defines (31 repos already run
-#          v1.0.264); rollout to every adopter follows in
-#          the same wave, each repo keeping its pin form
-#          (tag or SHA).
-# v5.28.10 - (Nov 2 2026) Push identity, take two: mint the
-#          Claude App token BEFORE checkout and hand it to
-#          checkout as its token, so the credential checkout
-#          persists is the app token itself. v5.28.9's
-#          persist-credentials: false broke PR-mode runs: the
-#          action fetches the PR head SHA before it configures
-#          git auth, and with no persisted credential that fetch
-#          dies ("could not read Username for https://github.com")
-#          - proven live on howmuchwaterdoineed.com PR #443
-#          leg 2, run 41447736182. With the app token persisted
-#          by checkout, setup fetches work, and pushes
-#          authenticate as claude[bot] whichever credential git
-#          prefers (the includeIf.gitdir header and the action's
-#          rewritten remote URL now carry the same app token).
-#          The mint step performs the same OIDC exchange the
-#          action performs for itself (audience
-#          claude-code-github-action, Anthropic app-token
-#          exchange endpoint); the action still mints its own
-#          token as before. Rollback is restoring the v5.28.8
-#          checkout step (no token input, no mint step).
-# v5.28.9 - (Nov 2 2026) Fix branch-push identity: the checkout
-#          step now sets persist-credentials: false.
-#          actions/checkout v7 stores the GITHUB_TOKEN credential
-#          in a RUNNER_TEMP file wired into the repo git config via
-#          includeIf.gitdir entries. claude-code-action's
-#          replaceCheckoutCredentials clears only include.path
-#          entries, so the checkout AUTHORIZATION header survived,
-#          git preferred it over the action's app-token remote URL,
-#          and Claude's branch pushes authenticated as
-#          github-actions[bot] (proven live 2026-11-02 on
-#          howmuchwaterdoineed.com #442 leg 1: the pushed commit's
-#          GitHub author/committer resolved to github-actions[bot]
-#          despite the OIDC app-token exchange succeeding). With
-#          no persisted checkout credential, the action's app-token
-#          remote URL is the only git auth and pushes run as
-#          claude[bot], whose events trigger downstream workflows
-#          without action_required parking. Rollback is removing
-#          the persist-credentials line.
-# v5.28.8 - (Oct 31 2026) CLI cache pin 2.1.314 -> 2.1.316
-#          (checksum from Anthropic's release manifest; the pin
-#          check script flagged the drift, issue #146).
-# v5.28.7 - (Oct 30 2026) Drop the explicit
-#          github_token: ${{ secrets.GITHUB_TOKEN }} input from the
-#          claude-code-action step. With it passed, the action
-#          operates as github-actions[bot] and GitHub's
-#          anti-recursion rule parks or suppresses the downstream
-#          pull_request runs Claude's pushes create (the CI /
-#          Deploy / review action_required classes). With it
-#          omitted, the action exchanges the job OIDC token for an
-#          official Claude GitHub App installation token and
-#          operates as claude[bot], whose events run downstream
-#          workflows automatically. The Claude app is installed at
-#          org level (repository_selection: all, verified
-#          2026-10-30) and the job already carries id-token: write,
-#          so no new secrets or permissions are needed. Pilot
-#          proof on folio-app: PR 3177 merged, test issue 3178,
-#          PR 3179 opened by claude[bot] with zero action_required
-#          runs. Rollback is re-adding the one line. Same bump:
-#          CLI cache pin 2.1.312 -> 2.1.314 (checksum from
-#          Anthropic's release manifest; the pin check flagged the
-#          drift on this PR, 2.1.314 released after the last run).
-# v5.28.6 - (Oct 28 2026) Remove the Bun download cache from the
-#          template: the actions/cache step on ~/.bun/install/cache
-#          is dropped where present (the bun-kind variants carrying
-#          a Set up Bun + install block; this repo's own variant has
-#          no such block). Measured restore median 32s (range
-#          29-38s) plus a 1s save to protect a bun install that then
-#          takes 1-4s (0-6s cold fleet-wide): the cache costs roughly
-#          10x the work it protects, an estimated 22-44 billed
-#          min/wk across the 31 repos carrying it. Set up Bun and
-#          bun install --frozen-lockfile stay. The Claude Code CLI
-#          cache below is unchanged (3s restore, 99 MB, hash-verified
-#          exact hits). Supersedes the 2026-10-14 owner override
-#          that kept the cache for Claude pre-install: the CI speed
-#          audit measurement shows that premise no longer holds.
-# v5.28.5 - (Oct 28 2026) CLI cache pin 2.1.311 -> 2.1.312 (checksum
-#          from Anthropic's release manifest); the pin check flagged
-#          the drift (issue tracking in the pin-check filing).
-# v5.28.4 - (Oct 27 2026) allowedTools hardening, completing the
-#          drop begun in the ruling candidate for the interpreter
-#          wildcard question: node, npx and python3 are joined by
-#          python, bunx, pip, pip3 and uv, so no interpreter or
-#          package-runner wildcard remains for a prompt-injected
-#          run to read the settings env block through. bash, bun,
-#          npm and pytest stay, with the git/gh and file tooling:
-#          the allowlist raises the bar on that injection path;
-#          it is not a sandbox. Same bump: CLI cache pin
-#          2.1.310 -> 2.1.311 (checksum from Anthropic's release
-#          manifest); the pin check flagged the drift on this PR.
-# v5.28.3 - (Oct 26 2026) CLI cache pin 2.1.286 -> 2.1.310 (checksum
-#          from Anthropic's release manifest) and the pin is no longer
-#          bumped blind: scripts/check-claude-cli-pin.sh compares the
-#          pin against the current release manifest, and the
-#          claude-cli-pin-check workflow (weekly + on template change)
-#          files a visible failure when it drifts (issue #100).
-# v5.28.2 - (Oct 24 2026) Label hygiene: a new label-hygiene job fires
-#          on issue close / PR merge and strips the robot + failed
-#          labels, so merged PRs and closed issues no longer wear a
-#          stale claude-failed. Main job never starts on a close event.
-# v5.28.1 - (Oct 21 2026) Setup profiles via vars.CLAUDE_SETUP_PROFILE:
-#          minimal (default, variable unset) is the unchanged template;
-#          agent adds a lite guardrails bootstrap; dev is agent plus the
-#          repo's own .claude/setup.sh when present. Agent/dev install
-#          checksum-pinned opengrep 1.30.0 + betterleaks 1.9.0 and the
-#          ruleset v2 packs/custom rules (cached), then wire lite git
-#          hooks via core.hooksPath - betterleaks secret gate at commit,
-#          opengrep ERROR gate at push - so findings land inside the
-#          run where Claude can fix them. Prompt: never bypass hooks.
-# v5.27 - (Oct 21 2026) actions/cache v4 -> v5 (Node 24; v4 was
-#          Node 20 and force-run with deprecation warnings).
-# v5.26 - (Oct 20 2026) Job timeout 55 / Claude step 45 uniform;
-#          --max-turns 150 -> 175 (action post-fails successful
-#          results that overshoot the cap while wrapping up);
-#          classifier treats a success result as complete even if
-#          the step conclusion is failure; prompt adds checkpoint
-#          pushes per item + turn discipline.
-# Triggered by @claude mentions in issues, PRs, and reviews.
-# Uses Z.AI routing (org ANTHROPIC_API_KEY is a Z.AI credential).
-#
-# v5.25 - (Oct 19 2026) Truthful status labels + speed: the completion
-#          badge now classifies every ending — success -> claude-complete,
-#          max-turns -> claude-failed-turns, timeout/cancelled ->
-#          claude-failed-time (label only, no comment, so superseded
-#          runs stay quiet), model/API (gateway) errors -> claude-failed-
-#          api, everything else -> claude-failed (incl. never-started).
-#          Cancelled runs no longer strand the 🤖 claude-working label.
-#          Failure comments carry a handoff (progress branch) and the
-#          prompt tells Claude to resume from it instead of re-exploring.
-#          Speed: bun pinned 1.4.2, bun install --frozen-lockfile with
-#          a download cache, timeout-minutes floor of 45.
-# v5.24 - (Oct 14 2026) Cross-stack allowlist: python3/pip/uv/pytest,
-#          cargo/rustc, go, npm/pnpm, make + everyday utilities
-#          (ls/cat/pwd/echo/chmod/tar/unzip/wc/du/tee/xargs/
-#          timeout/sqlite3) so non-JS repos stop eating Bash
-#          permission denials; --max-turns 125 -> 150 (turn data:
-#          125-cap deaths 6.6%, 13.4s/turn, 150 fits 35-min timeout).
-# v5.23 - (Oct 13 2026) Boot + resilience delta: --fallback-model
-#          claude-haiku-4-5 + --effort medium, Claude CLI binary
-#          cache (path_to_claude_code_executable on cache hit),
-#          ENABLE_PROMPT_CACHING_1H.
-# v5.22 - (Oct 13 2026) Fleet rollout of the pilot template: max-turns
-#          75 -> 125, wider Bash allowlist, dependency pre-install +
-#          cache before the Claude step, retry watchdog env (the
-#          actual retry mechanism), actions:read for the CI MCP
-#          tools, show_full_output off, action pin v1.0.238.
-# v5.21 - (Sep 30 2026) Bump to v1.0.237 (Claude Code 2.1.285 — native
-#          AGENTS.md support, no CLAUDE.md symlink needed). Increased max-turns to 75.
-# v5.20 - Concurrency groups, AGENTS.md-first prompt.
-# v5.19 - Z.AI routing, sonnet-4-5/haiku-4-5 pins.
+# Claude Code Assistant v5.28.21
+# Changelog: .github/workflows/claude-changelog.md in
+# gh-actions-and-skills (moved out of this file in v5.28.20 so
+# adopter copies stop carrying the full history; add new entries
+# there, newest first, and bump the version on line 1 here).
 
 name: Claude Code
 
@@ -335,6 +52,10 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            // Canonical Claude status label list. The badge steps below
+            // and the label-hygiene job copy it as literals (steps in one
+            // file cannot share JS); scripts/tests/check-workflow-drift.sh
+            // pins the copies, so edit the list here only.
             const labels = [
               { name: '🤖 claude-working', color: 'f97316', description: 'Claude AI is currently analyzing this issue/PR' },
               { name: '✅ claude-complete', color: '22c55e', description: 'Claude AI has successfully completed analysis' },
@@ -428,6 +149,12 @@ jobs:
           # files), installs the
           # ruleset v2, writes the lite git hooks, and points this checkout's
           # core.hooksPath at them so Claude's own git commands run the gates.
+          # Load-bearing inlining: the rules file and the two git hooks
+          # below are heredocs on purpose. This workflow is copied
+          # standalone into adopter repos, so the bootstrap cannot read
+          # sibling files; the heredoc bodies ARE the shipped artifacts.
+          # scripts/tests/check-workflow-drift.sh (Shell CI) extracts
+          # the two hook heredocs and shellchecks them.
           LITE="$HOME/.claude-lite"
           mkdir -p "$LITE/bin" "$LITE/hooks" "$LITE/rules"
           sha_ok() { [ -f "$1" ] && echo "$2  $1" | sha256sum --check - >/dev/null 2>&1; }
@@ -462,7 +189,7 @@ jobs:
           # rules list) and their combined hash is logged every run as drift
           # telemetry across runs. The custom
           # rules ARE hard-pinned: a mismatch means the inlined copy was altered.
-          CUSTOM_SHA256="2f5c5d02b0dd7ddc859eb1ac049ee35cb06a2ccfc6170cfdea8798a00a157e6d"
+          CUSTOM_SHA256="ce97d748921b83f2eb813a8611daf1a5dfbeb8b23c058661f964f9ce0dfff657"
           if ! sha_ok "$LITE/rules/ai-agent-security-v2.yml" "$CUSTOM_SHA256"; then
             cat > "$LITE/rules/ai-agent-security-v2.yml" <<'CLAUDE_LITE_RULES_EOF'
           # yamllint disable
@@ -730,7 +457,8 @@ jobs:
               category: security
               remediation: Restrict to specific directories
           - id: python-llm-unrestricted-tool-access
-            pattern: tools=$ALL_TOOLS
+            pattern: |
+              $FN(..., tools=ALL_TOOLS, ...)
             message: LLM with unrestricted tool access (specify exact tools)
             languages:
             - python
@@ -1023,6 +751,8 @@ jobs:
           script: |
             const n = '${{ steps.context.outputs.issue_number }}';
             if (!n) return;
+            // Literal copy of the Create Claude Labels definition (top of
+            // this job); pinned by scripts/tests/check-workflow-drift.sh.
             const claudeLabels = ['🤖 claude-working', '✅ claude-complete', '❌ claude-failed', '❌ claude-failed-turns', '❌ claude-failed-time', '❌ claude-failed-api'];
             try {
               const current = await github.paginate(github.rest.issues.listLabelsOnIssue, { owner: context.repo.owner, repo: context.repo.repo, issue_number: n, per_page: 100 });
@@ -1087,6 +817,8 @@ jobs:
             const status = '${{ steps.claude_action.conclusion }}';
             const execFile = '${{ steps.claude_action.outputs.execution_file }}';
             const actionBranch = '${{ steps.claude_action.outputs.branch_name }}';
+            // Literal copy of the Create Claude Labels definition (top of
+            // this job); pinned by scripts/tests/check-workflow-drift.sh.
             const statusLabels = ['🤖 claude-working', '✅ claude-complete', '❌ claude-failed', '❌ claude-failed-turns', '❌ claude-failed-time', '❌ claude-failed-api'];
             const stripStatus = async (except) => {
               try {
@@ -1199,6 +931,9 @@ jobs:
             if (isPR && !payload.pull_request.merged) return;
             const n = context.issue.number;
             if (!n) return;
+            // The Create Claude Labels list minus claude-complete (a
+            // completed badge survives close on purpose); pinned by
+            // scripts/tests/check-workflow-drift.sh.
             const stale = ['🤖 claude-working', '❌ claude-failed', '❌ claude-failed-turns', '❌ claude-failed-time', '❌ claude-failed-api'];
             const res = await github.rest.issues.listLabelsOnIssue({ owner: context.repo.owner, repo: context.repo.repo, issue_number: n, per_page: 100 });
             const present = new Set(res.data.map(l => l.name));
@@ -1210,3 +945,4 @@ jobs:
                 if (e.status !== 404) throw e;
               }
             }
+
