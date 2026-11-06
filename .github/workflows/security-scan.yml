@@ -25,9 +25,10 @@ name: security-scan
     - cron: "0 9 * * 1" # Mondays 09:00 UTC
   workflow_dispatch:
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+# No caller concurrency on this thin caller: the fleet rule is
+# never cancel-in-progress here; the reusable's inner job owns
+# the group (repo-review#238). Owner ruling 2026-11-06: the
+# fleet rule wins, no template exception.
 
 # Explicit per this repo's workflow convention (the vendored
 # file declared the same). The reusable declares no job
