@@ -1,4 +1,4 @@
-# Qodo AI Code Suggestions v3.7.0
+# Qodo AI Code Suggestions v3.8.0
 # Inline code suggestions only — the highest-value, lowest-noise output.
 # All config lives in webuildstuffio/pr-agent-settings/.pr_agent.toml (global)
 # and per-repo .pr_agent.toml (overrides). This workflow is intentionally minimal.
@@ -21,6 +21,18 @@
 # /review and /describe available via manual /command in PR comments.
 #
 # CHANGELOG:
+# v3.8.0: (Nov 6 2026) Skip the review jobs on docs-only
+#          PRs (repo-review #686): a changes job runs the
+#          fleet dorny/paths-filter pattern (job-level,
+#          never workflow-level paths:) and suggest + jev
+#          run only when it reports a code change, or
+#          when it was skipped or failed (non-PR events,
+#          filter errors: fail open, the review runs).
+#          Docs-only PRs get no Qodo suggestions and no
+#          Jev pass, saving about 3 billed min per
+#          docs-only PR opening. Same wave (repo-review
+#          #687): the dead Docker cache step is removed;
+#          it never saved a single cache entry.
 # v3.7.0: (Nov 4 2026) Global Qodo config restored after the
 #          pr-agent-settings privatization silently dropped it
 #          (2026-11-01 to 2026-11-04). New "Global Qodo config"
@@ -93,9 +105,43 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Detect code changes
+    if: github.event_name == 'pull_request'
+    runs-on: ${{ vars.CI_RUNNER || 'ubicloud-standard-2' }}
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          # 'some-with-excludes' makes the negations below effective
+          # (default 'some' lets the leading '**' win). Fail open:
+          # if this job fails or is skipped (non-PR events), the
+          # review jobs below still run.
+          predicate-quantifier: 'some-with-excludes'
+          filters: |
+            code:
+              - '**'
+              - '!**/*.md'
+              - '!docs/**'
+              - '!LICENSE*'
+              - '!README*'
+              - '!CHANGELOG*'
+              - '!.github/ISSUE_TEMPLATE/**'
+              - '!.github/PULL_REQUEST_TEMPLATE*'
+
   suggest:
+    needs: changes
     if: >-
       ${{
+        always() &&
+        (needs.changes.result == 'skipped' || needs.changes.result == 'failure' || needs.changes.outputs.code == 'true') &&
         (
           github.event_name == 'pull_request' &&
           github.event.pull_request.draft == false &&
@@ -132,13 +178,6 @@ jobs:
       contents: read
     name: Code Suggestions (free models)
     steps:
-      - name: Docker Cache
-        uses: actions/cache@v6
-        with:
-          path: /var/lib/docker
-          key: qodo-docker-${{ runner.os }}-pr-agent-0.48.0
-          restore-keys: qodo-docker-${{ runner.os }}-pr-agent-
-
       - name: Set PR for manual runs
         if: github.event_name == 'workflow_dispatch'
         uses: actions/github-script@v9
@@ -279,8 +318,11 @@ jobs:
   # prepared, before any step runs, so a Jev load failure can
   # only ever fail this job, never the suggestions.
   jev:
+    needs: changes
     if: >-
       ${{
+        always() &&
+        (needs.changes.result == 'skipped' || needs.changes.result == 'failure' || needs.changes.outputs.code == 'true') &&
         (
           github.event_name == 'pull_request' &&
           github.event.pull_request.draft == false &&
