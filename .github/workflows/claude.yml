@@ -1,11 +1,134 @@
-# Claude Code Assistant v5.28.11
-# v5.28.18 wave (Nov 6 2026): the dead Claude CLI cache steps
-#          are removed from this copy (repo-review #687):
-#          cache mode on every trigger here is read-only and
-#          no claude-cli cache entry ever saved fleet-wide,
-#          so claude-code-action installs its bundled CLI.
-#          Template change only; this copy otherwise stays
-#          at its v5.28.11 base.
+# Claude Code Assistant v5.28.20
+# v5.28.20 - (Nov 6 2026) GLM model wiring through org vars:
+#          the model slots now follow the z.ai documented
+#          Claude Code configuration instead of Claude model
+#          names (every claude-* name is served by
+#          GLM-5.3-Flash on the z.ai endpoint, so the flagship
+#          never ran). ANTHROPIC_MODEL and the opus/sonnet
+#          slots resolve to vars.CLAUDE_MODEL (default
+#          glm-5.3[1m]); the haiku slot and the small/fast
+#          model resolve to vars.CLAUDE_SMALL_MODEL (default
+#          glm-5.3-flash[1m]); the [1m] suffix plus
+#          CLAUDE_CODE_AUTO_COMPACT_WINDOW (vars-driven,
+#          default 1000000) enables the 1M context window;
+#          CLAUDE_CODE_MAX_OUTPUT_TOKENS is 128000;
+#          API_TIMEOUT_MS is vars-driven (default 1200000, a
+#          per-call ceiling, separate from the retry count);
+#          --fallback-model and --effort are vars-driven the
+#          same way (CLAUDE_EFFORT default max, the level z.ai
+#          recommends for coding). Changing models, effort or
+#          timeouts is now an org-variable edit, no template
+#          change or rollout needed.
+# v5.28.19 - (Nov 6 2026) Full-SHA pinning for first-party
+#          actions (repo-review #696, owner-approved): every
+#          version-tag pin in this template moves to its full
+#          40-char SHA, with the version kept as a trailing
+#          comment (actions/checkout@<sha> # v7), matching
+#          the pinning already used for org reusables. Same
+#          pass in qodo-review.yml v3.8.1, the repo templates
+#          and then every adopter repo.
+# v5.28.18 - (Nov 6 2026) Remove the dead Claude CLI cache
+#          (repo-review #687). Every trigger this workflow has
+#          runs with cache mode read (verified in the job setup
+#          log of live runs, 2026-11-06), and the fleet cache
+#          list holds zero claude-cli entries in every sampled
+#          repo: the actions/cache step could never save, so
+#          each run paid a restore miss for config that only
+#          pretended to cache. The Cache and Resolve steps and
+#          the path_to_claude_code_executable input are gone;
+#          claude-code-action installs its own bundled CLI.
+#          The CLI pin check existed only to govern this
+#          cache pin, so scripts/check-claude-cli-pin.sh and
+#          the claude-cli-pin-check workflow are removed with
+#          it, and the check-registry entry records the
+#          removal. Same pass in qodo-review.yml v3.7.1: the
+#          Docker cache step is removed (zero qodo-docker
+#          cache entries fleet-wide; /var/lib/docker is not a
+#          portable cache path on ephemeral runners).
+# v5.28.17 - (Nov 5 2026) The lite bootstrap stops checking
+#          shell-config out. The v5.28.16 design read the
+#          pinned shell-config checkout with the Claude App
+#          token, but that token is scoped to the repo the
+#          run operates in, so the checkout fails in adopter
+#          repos. The bootstrap now calls shell-config's
+#          agent-tools composite action at the pinned commit
+#          recorded in check-registry.yml
+#          (uses: webuildstuffio/shell-config/.github/
+#          actions/agent-tools@<sha>, bin-dir input
+#          ~/.claude-lite/bin): composite actions follow the
+#          source repo's Actions access policy (shell-config
+#          is set to organization, the repo-review pattern),
+#          not the caller's token, so no cross-repo read
+#          credential is involved. The action runs the same
+#          agents-preset tools-only install and asserts the
+#          three binaries itself; the bootstrap keeps its own
+#          fail-closed assertion before hooks and probes run.
+# v5.28.16 - (Nov 5 2026) The lite bootstrap stops carrying
+#          hand-copied opengrep, betterleaks and hyperfine
+#          pins. A new step checks out
+#          webuildstuffio/shell-config at a pinned commit
+#          (read with the Claude App token minted above) and
+#          the bootstrap runs shell-config's tools-only
+#          install for its agents preset (install.sh
+#          --agent-tools with SHELL_CONFIG_PRESET set to
+#          agents) with SC_BIN_DIR=$LITE/bin. The three
+#          tools' version and checksum pins now live in
+#          shell-config's installers, where the local
+#          surface already uses them; check-registry.yml
+#          records the pinned shell-config ref instead of
+#          per-tool pins and the drift lint covers the new
+#          shape. The bootstrap still fails closed: it
+#          asserts all three binaries landed in $LITE/bin
+#          before hooks and probes run. New runtime
+#          dependency: the Claude App token must be able to
+#          read shell-config from adopter repos (the app
+#          is installed on shell-config itself; a one-repo
+#          pilot verifies this at rollout time). Rollout to
+#          adopter repos is a separate owner-approved wave,
+#          not part of this template change.
+# v5.28.15 - (Nov 5 2026) hyperfine 2.0.0 joins the lite
+#          bootstrap (agent and dev profiles): the pinned
+#          release tarball and binary are SHA256-verified
+#          before install, same pattern as opengrep and
+#          betterleaks, and $LITE/bin is added to GITHUB_PATH
+#          so the agent can call hyperfine by name for
+#          benchmark work (Bash(hyperfine:*) allowlisted).
+#          Timing numbers are only comparable when the
+#          measuring tool is identical everywhere; the pin
+#          matches shell-config's core-tool install. The
+#          check-registry gains the matching tools entry and
+#          the drift lint covers the pin. Rollout to adopter
+#          repos is a separate owner-approved wave, not part
+#          of this template change.
+# v5.28.14 - (Nov 5 2026) Pre-push gate fails closed on an
+#          unresolvable range (muse-tools audit issue 91): the
+#          claude-lite pre-push hook diffed the branch against
+#          the remote tip inside a process substitution, so a
+#          remote tip missing from the local clone (fresh
+#          worktree, shallow fetch, moved remote) made the diff
+#          fail invisibly, the changed-file list came back
+#          empty, and the opengrep gate silently scanned
+#          nothing. The hook now verifies the remote tip
+#          resolves (cat-file), fetches it when missing, blocks
+#          the push when it still cannot resolve, and captures
+#          the diff through a checked temp file; betterleaks
+#          only runs on a verified range.
+# v5.28.13 - (Nov 5 2026) Bot-author guard on the trigger: the
+#          comment and review clauses of the job if: now require
+#          a non-Bot author. Review bots quote the trigger line
+#          when reviewing this file, and claude[bot]'s own
+#          comments can carry the trigger string; either one
+#          re-entered the concurrency group and cancelled the
+#          in-flight run (self-cancellation loop, audit issue
+#          149 item 2). Human triggers are unchanged.
+# v5.28.12 - (Nov 4 2026) Runner names from GitHub variables:
+#          both jobs resolve the CI_RUNNER org variable with an
+#          in-YAML ubicloud-standard-2 fallback, matching the
+#          fleet runner-variable standard proven on
+#          repo-template-vite PR 175 and rolled out fleet-wide
+#          the same day (templates, repo-review reusables, then
+#          every adopter repo). Swapping runner providers is now
+#          a variable change, not a fleet-wide template rollout.
 # v5.28.11 - (Nov 4 2026) Toolchain pins: claude-code-action
 #          v1.0.262 -> v1.0.268, CLI cache pin 2.1.316 ->
 #          2.1.318 (checksum from Anthropic's release
@@ -56,7 +179,7 @@
 #          (checksum from Anthropic's release manifest; the pin
 #          check script flagged the drift, issue #146).
 # v5.28.7 - (Oct 30 2026) Drop the explicit
-#          github_token: ${{ secrets.GITHUB_TOKEN }} from the
+#          github_token: ${{ secrets.GITHUB_TOKEN }} input from the
 #          claude-code-action step. With it passed, the action
 #          operates as github-actions[bot] and GitHub's
 #          anti-recursion rule parks or suppresses the downstream
@@ -190,11 +313,11 @@ jobs:
       group: claude-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
       cancel-in-progress: true
     if: |
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+      (github.event_name == 'issue_comment' && github.event.comment.user.type != 'Bot' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && github.event.comment.user.type != 'Bot' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review' && github.event.review.user.type != 'Bot' && contains(github.event.review.body, '@claude')) ||
       (github.event_name == 'issues' && github.event.action != 'closed' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
-    runs-on: ubicloud-standard-2
+    runs-on: ${{ vars.CI_RUNNER || 'ubicloud-standard-2' }}
     timeout-minutes: 55
     permissions:
       contents: write
@@ -282,6 +405,12 @@ jobs:
         with:
           token: ${{ steps.claude-app-token.outputs.token }}
 
+      - name: Install lite tools (shell-config agent-tools action)
+        if: vars.CLAUDE_SETUP_PROFILE == 'agent' || vars.CLAUDE_SETUP_PROFILE == 'dev'
+        uses: webuildstuffio/shell-config/.github/actions/agent-tools@dfe1fc3373a96cb15b76590d0f6e8aba27a06224
+        with:
+          bin-dir: "~/.claude-lite/bin"
+
       - name: Claude Lite bootstrap
         if: vars.CLAUDE_SETUP_PROFILE == 'agent' || vars.CLAUDE_SETUP_PROFILE == 'dev'
         env:
@@ -291,37 +420,35 @@ jobs:
         run: |
           set -euo pipefail
           # claude-lite bootstrap (template v5.28.1). Runs only when the repo sets
-          # vars.CLAUDE_SETUP_PROFILE to agent or dev. Installs the guardrail
-          # tools (checksum-pinned release downloads, verified before use;
-          # deliberately no actions/cache: comment-triggered runs get read-only
+          # vars.CLAUDE_SETUP_PROFILE to agent or dev. The guardrail
+          # tools plus hyperfine were installed into $LITE/bin by the
+          # shell-config agent-tools action step above (v5.28.17)
+          # (deliberately no actions/cache: comment-triggered runs get read-only
           # cache at best, and a post-job save would persist agent-writable
           # files), installs the
           # ruleset v2, writes the lite git hooks, and points this checkout's
           # core.hooksPath at them so Claude's own git commands run the gates.
           LITE="$HOME/.claude-lite"
           mkdir -p "$LITE/bin" "$LITE/hooks" "$LITE/rules"
-          OG_SHA256="35779bdd72e92129c8df2a77f0c55e8c08356801ea92591ef32108d6b28d564c"
-          BL_SHA256="f8b185a39ffcece2a1ca82bf3a4e7435cd81963ffd16b7a9128daf75f35f6de7"
-          BL_BIN_SHA256="0ace40b41652344608f89967fe93c6caf4faae9a4df20423632c7efb02a4d4e1"
           sha_ok() { [ -f "$1" ] && echo "$2  $1" | sha256sum --check - >/dev/null 2>&1; }
-          if ! sha_ok "$LITE/bin/opengrep" "$OG_SHA256"; then
-            tmp=$(mktemp -d)
-            curl -fsSL --retry 3 --connect-timeout 15 --max-time 300 -o "$tmp/opengrep" \
-              "https://github.com/opengrep/opengrep/releases/download/v1.30.0/opengrep_manylinux_x86"
-            echo "$OG_SHA256  $tmp/opengrep" | sha256sum --check -
-            install -m 755 "$tmp/opengrep" "$LITE/bin/opengrep"
-            rm -rf "$tmp"
-          fi
-          if ! sha_ok "$LITE/bin/betterleaks" "$BL_BIN_SHA256"; then
-            tmp=$(mktemp -d)
-            curl -fsSL --retry 3 --connect-timeout 15 --max-time 180 -o "$tmp/bl.tgz" \
-              "https://github.com/betterleaks/betterleaks/releases/download/v1.9.0/betterleaks_1.9.0_linux_x64.tar.gz"
-            echo "$BL_SHA256  $tmp/bl.tgz" | sha256sum --check -
-            tar --no-same-owner -xzf "$tmp/bl.tgz" -C "$tmp" betterleaks
-            echo "$BL_BIN_SHA256  $tmp/betterleaks" | sha256sum --check -
-            install -m 755 "$tmp/betterleaks" "$LITE/bin/betterleaks"
-            rm -rf "$tmp"
-          fi
+          # Guardrail tools plus hyperfine come from shell-config's
+          # agent-tools composite action (step above, v5.28.17): the
+          # pins live in shell-config's installers (opengrep,
+          # betterleaks and hyperfine are exact version pins with
+          # sha256 verification), not in this file. The action
+          # asserts the three binaries itself; the loop below is
+          # this step's own fail-closed re-check before hooks and
+          # probes rely on them. hyperfine is not a hook tool: hooks
+          # call the guardrail binaries by absolute path, hyperfine
+          # is for the agent shell, so $LITE/bin joins GITHUB_PATH
+          # below.
+          for tool in opengrep betterleaks hyperfine; do
+            if [ ! -x "$LITE/bin/$tool" ]; then
+              echo "lite bootstrap: missing $tool in $LITE/bin" >&2
+              exit 1
+            fi
+          done
+          echo "$LITE/bin" >> "$GITHUB_PATH"
           # Ruleset v2: 10 registry packs, pre-downloaded as local files so hook
           # scans never resolve packs over the network; plus the custom rules,
           # whose canonical source is repo-review
@@ -640,6 +767,7 @@ jobs:
           # Warm the opengrep runtime extraction now, not inside Claude's first push.
           "$LITE/bin/opengrep" --version >/dev/null 2>&1 || true
           "$LITE/bin/betterleaks" version >/dev/null 2>&1 || true
+          "$LITE/bin/hyperfine" --version >/dev/null 2>&1 || true
           cat > "$LITE/hooks/pre-commit" <<'CLAUDE_LITE_HOOK_EOF'
           #!/usr/bin/env bash
           # claude-lite pre-commit (template v5.28.1, CLAUDE_SETUP_PROFILE=agent/dev).
@@ -702,8 +830,10 @@ jobs:
           cd "$root" || exit 0
           ZERO=0000000000000000000000000000000000000000
           rc=0
+          range_ok=1
           while read -r _local_ref local_sha _remote_ref remote_sha; do
             [ "$local_sha" = "$ZERO" ] && continue
+            range_ok=1
             if [ "$remote_sha" = "$ZERO" ]; then
               range="new branch at $local_sha"
               # Only origin's remote-tracking refs count as already-pushed:
@@ -718,9 +848,34 @@ jobs:
             else
               range="$remote_sha..$local_sha"
               log_opts="$range"
-              mapfile -d '' -t files < <(git diff --name-only -z --diff-filter=ACMR "$remote_sha" "$local_sha")
+              # The remote tip must resolve in this clone before any
+              # range scan runs: a diff against a missing commit used
+              # to fail inside a process substitution, leaving files
+              # empty and the opengrep gate scanning nothing while
+              # the push sailed through (muse-tools issue #91).
+              if ! git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+                git fetch --quiet origin "$remote_sha" 2>/dev/null || git fetch --quiet origin 2>/dev/null || true
+              fi
+              if ! git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+                echo "== claude-lite: remote tip $remote_sha is not in this clone and could not be fetched - push blocked ==" >&2
+                echo "== the pushed range cannot be computed, so neither pre-push scan can run; fetch the branch and retry ==" >&2
+                rc=1
+                range_ok=0
+                files=()
+              else
+                diff_tmp=$(mktemp)
+                if git diff --name-only -z --diff-filter=ACMR "$remote_sha" "$local_sha" >"$diff_tmp"; then
+                  mapfile -d '' -t files <"$diff_tmp"
+                else
+                  echo "== claude-lite: git diff $range failed - push blocked ==" >&2
+                  rc=1
+                  range_ok=0
+                  files=()
+                fi
+                rm -f "$diff_tmp"
+              fi
             fi
-            if [ -x "$BL" ]; then
+            if [ -x "$BL" ] && [ "$range_ok" -eq 1 ]; then
               bl_out=$(mktemp)
               timeout 300 "$BL" git --redact --no-banner --log-opts "$log_opts" . >"$bl_out" 2>&1
               bl_rc=$?
@@ -897,18 +1052,23 @@ jobs:
             Read AGENTS.md at the repo root first for project-specific guidelines.
           claude_args: |
             --max-turns 175
-            --fallback-model claude-haiku-4-5
-            --effort medium
+            --fallback-model ${{ vars.CLAUDE_SMALL_MODEL || 'glm-5.3-flash[1m]' }}
+            --effort ${{ vars.CLAUDE_EFFORT || 'max' }}
             --append-system-prompt "You are a senior SWE. Read AGENTS.md at the repo root first — it has project-specific guidelines that take precedence. Security-review your changes, keep quality high, avoid overengineering. Be pragmatic: user value first. If a comment marked 'claude-handoff' names a progress branch, continue from that branch instead of starting over. Work item by item: after finishing each numbered item, commit and push to your branch before starting the next one. Be economical with turns: batch independent tool calls in one block, read each file once, and run the full check suite once at the end rather than after every edit. Never bypass git hooks (no --no-verify, no core.hooksPath overrides): if a hook blocks a commit or push, read its output and recover, never bypass: for a secret finding, commit everything else and report the blocked file (only a demonstrably fake fixture value may be triaged via a .betterleaksignore fingerprint entry; a real-looking secret is never committed); for a code finding, push everything except the flagged files and put the blocked work in your summary so it is not lost."
-            --allowedTools "Read,Write,Edit,Glob,Grep,WebFetch,WebSearch,TodoWrite,Bash(bun:*),Bash(oxlint:*),Bash(gh:*),Bash(git:*),Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(find:*),Bash(wc:*),Bash(mkdir:*),Bash(cp:*),Bash(mv:*),Bash(rm:*),Bash(jq:*),Bash(curl:*),Bash(head:*),Bash(tail:*),Bash(sed:*),Bash(awk:*),Bash(diff:*),Bash(sort:*),Bash(which:*),Bash(env:*),Bash(sleep:*),Bash(pytest:*),Bash(cargo:*),Bash(rustc:*),Bash(go:*),Bash(npm:*),Bash(pnpm:*),Bash(make:*),Bash(ls:*),Bash(cat:*),Bash(pwd:*),Bash(echo:*),Bash(chmod:*),Bash(tar:*),Bash(unzip:*),Bash(wc:*),Bash(du:*),Bash(tee:*),Bash(xargs:*),Bash(timeout:*),Bash(sqlite3:*),Bash(bash:*)"
+            --allowedTools "Read,Write,Edit,Glob,Grep,WebFetch,WebSearch,TodoWrite,Bash(bun:*),Bash(oxlint:*),Bash(gh:*),Bash(git:*),Bash(npm:*),Bash(pnpm:*),Bash(yarn:*),Bash(cargo:*),Bash(go:*),Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(find:*),Bash(wc:*),Bash(mkdir:*),Bash(cp:*),Bash(mv:*),Bash(rm:*),Bash(jq:*),Bash(curl:*),Bash(head:*),Bash(tail:*),Bash(sed:*),Bash(awk:*),Bash(diff:*),Bash(sort:*),Bash(which:*),Bash(env:*),Bash(sleep:*),Bash(pytest:*),Bash(cargo:*),Bash(rustc:*),Bash(go:*),Bash(npm:*),Bash(pnpm:*),Bash(make:*),Bash(ls:*),Bash(cat:*),Bash(pwd:*),Bash(echo:*),Bash(chmod:*),Bash(tar:*),Bash(unzip:*),Bash(wc:*),Bash(du:*),Bash(tee:*),Bash(xargs:*),Bash(timeout:*),Bash(hyperfine:*),Bash(sqlite3:*),Bash(bash:*)"
           settings: |
             {
               "env": {
                 "ANTHROPIC_AUTH_TOKEN": "${{ secrets.ANTHROPIC_API_KEY }}",
                 "ANTHROPIC_BASE_URL": "${{ vars.CLAUDE_BASE_URL || 'https://api.z.ai/api/anthropic' }}",
-                "ANTHROPIC_MODEL": "${{ vars.CLAUDE_MODEL || 'claude-sonnet-4-5' }}",
-                "ANTHROPIC_SMALL_FAST_MODEL": "${{ vars.CLAUDE_SMALL_MODEL || 'claude-haiku-4-5' }}",
-                "API_TIMEOUT_MS": "600000",
+                "ANTHROPIC_MODEL": "${{ vars.CLAUDE_MODEL || 'glm-5.3[1m]' }}",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "${{ vars.CLAUDE_MODEL || 'glm-5.3[1m]' }}",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "${{ vars.CLAUDE_MODEL || 'glm-5.3[1m]' }}",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "${{ vars.CLAUDE_SMALL_MODEL || 'glm-5.3-flash[1m]' }}",
+                "ANTHROPIC_SMALL_FAST_MODEL": "${{ vars.CLAUDE_SMALL_MODEL || 'glm-5.3-flash[1m]' }}",
+                "API_TIMEOUT_MS": "${{ vars.CLAUDE_API_TIMEOUT_MS || '1200000' }}",
+                "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "${{ vars.CLAUDE_AUTO_COMPACT_WINDOW || '1000000' }}",
+                "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "128000",
                 "CLAUDE_CODE_RETRY_WATCHDOG": "1",
                 "CLAUDE_CODE_MAX_RETRIES": "10",
                 "ENABLE_PROMPT_CACHING_1H": "1"
@@ -1024,7 +1184,7 @@ jobs:
     # Terminal-state label cleanup. Runs only on close events (job-level
     # if), independent of the claude job's concurrency group on purpose.
     if: github.event.action == 'closed' && (github.event_name == 'issues' || github.event.pull_request.merged == true)
-    runs-on: ubicloud-standard-2
+    runs-on: ${{ vars.CI_RUNNER || 'ubicloud-standard-2' }}
     timeout-minutes: 5
     permissions:
       issues: write
