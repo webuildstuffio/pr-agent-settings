@@ -22,7 +22,7 @@ Org-wide AI code-review configuration for the webuildstuffio GitHub org. This re
 - Model: `openrouter/google/gemma-4-31b-it:free` primary + 7-model `:free` fallback chain; `openrouter/free` is last resort only. `custom_model_max_tokens = 131072`.
 - `/improve` is the only auto-trigger (`auto_review`/`auto_describe` stay `false`) — highest value, lowest noise.
 - Suggestion tuning: severity 8+/10 only, max 2 per file, ≤2 sentences, no cosmetic/naming/docs suggestions, focus on bugs/security/correctness/perf/error handling.
-- Workflow style: pin actions by tag, explicit `permissions:` blocks, concurrency groups keyed by PR/issue number, `continue-on-error` only for cosmetic steps (labels/badges).
+- Workflow style: pin actions by full SHA (version kept as a trailing comment), explicit `permissions:` blocks, concurrency groups keyed by PR/issue number, `continue-on-error` only for cosmetic steps (labels/badges).
 
 ## Non-negotiables
 
