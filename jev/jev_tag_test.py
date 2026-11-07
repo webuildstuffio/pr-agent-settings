@@ -10,9 +10,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from jev_lib import (STATE_BUDGET, VERSION, build_questions,
-                     build_state, clamp_priority, decide, layer1,
-                     plan_labels, repo_specialties)
+from jev_lib import (STATE_BUDGET, VERSION, JevError,
+                     build_questions, build_security_state,
+                     build_state, call_jev, clamp_priority, decide,
+                     docs_only, layer1, plan_labels, repo_specialties,
+                     security_questions)
 from jev_tag import (Gh, GhError, apply_decision, codex_focus,
                      escalation_comment, escalation_section,
                      find_marker, match_user_facing_label, marker_body,
@@ -291,8 +293,12 @@ def self_test():
     check("human floor keeps blast escalation",
           d8["security_band"] == "high" and d8["codex_post"] is True)
     d6 = decide(bundle, layer1(b), None)
-    check("path hit posts without jev", d6["security_band"] == "high"
-          and d6["codex_post"] is True)
+    check("path hit without jev: band high, abstain, no post "
+          "(v2.2.0: no concurrence without a model answer)",
+          d6["security_band"] == "high"
+          and d6["codex_post"] is False
+          and d6["abstained"] is True
+          and d6["labels_desired"] == ["type:security"])
     prior_self = {"pr_applied": ["type:security"], "issue_applied": [],
                   "issue_number": None}
     d3 = decide(sec_bundle, plain, None, prior=prior_self)
@@ -451,12 +457,14 @@ def apply_tests():
                  "\"@codex security review\".")}]
     gh = FakeGh2(comments=codex_summary)
     out = apply_decision(gh, bundle, dict(d_sec))
+    bodies = [(p.get("body") or "") for p in gh.comment_posts]
     check("codex boilerplate does not dedupe the trigger",
           out["codex_posted_now"] is True
-          and len(gh.comment_posts) == 1
-          and "@codex security review"
-          in (gh.comment_posts[0].get("body") or "").splitlines()
-          and "band `high`" in gh.comment_posts[0]["body"])
+          and out["codex_standalone_posted"] is True
+          and len(bodies) == 2
+          and bodies[0] == "@codex security review"
+          and "@codex security review" in bodies[1].splitlines()
+          and "band `high`" in bodies[1])
     human_mention = [{"user": {"login": "nichm"},
                       "body": "@codex security review"}]
     gh = FakeGh2(comments=human_mention)
@@ -824,7 +832,7 @@ def v21_tests():
         print(("PASS " if cond else "FAIL ") + name)
         ok = ok and bool(cond)
 
-    check("version is 2.1.0", VERSION == "2.1.0")
+    check("version is 2.2.0", VERSION == "2.2.0")
     auth_hit = {"kind": "path", "match": "src/auth/login.ts",
                 "category": "auth", "critical": False}
     d_full = {"labels_desired": ["P1", "type:security"],
@@ -899,17 +907,25 @@ def v21_tests():
           comment is None)
 
     # --- token selection: PATCH an owner-authored sticky
+    # (v2.2.0: the standalone trigger POST also goes through the
+    # PAT client, before the sticky PATCH)
     main_gh, pat_gh = RecGh(), RecGh()
     out = apply_decision(main_gh, bundle, dict(d_full),
                          comments=[owner_marker(state0)],
                          mention_gh=pat_gh, mention_login="ownerx")
     writes = pat_gh.sticky_writes()
+    patches = [w for w in writes if w[0] == "PATCH"]
     check("sticky PATCH goes through the PAT client",
-          len(writes) == 1 and writes[0][0] == "PATCH"
-          and writes[0][1] == "/repos/o/r/issues/comments/777"
+          len(patches) == 1
+          and patches[0][1] == "/repos/o/r/issues/comments/777"
           and main_gh.sticky_writes() == [])
+    check("standalone trigger posted via PAT, exact body",
+          out["codex_standalone_posted"] is True
+          and any(w[0] == "POST"
+                  and w[2]["body"] == "@codex security review"
+                  for w in writes))
     check("patched sticky carries the trigger exactly once",
-          [ln for ln in writes[0][2]["body"].splitlines()
+          [ln for ln in patches[0][2]["body"].splitlines()
            if ln == "@codex security review"]
           == ["@codex security review"])
     check("labels stay on the workflow-token client",
@@ -919,13 +935,17 @@ def v21_tests():
           out["sticky_identity"] == "owner-pat")
 
     # --- token selection: create a fresh sticky via the PAT
+    # (v2.2.0: plus the standalone trigger POST, also via the PAT)
     main_gh, pat_gh = RecGh(), RecGh()
     out = apply_decision(main_gh, bundle, dict(d_full), comments=[],
                          mention_gh=pat_gh, mention_login="ownerx")
     writes = pat_gh.sticky_writes()
     check("sticky create goes through the PAT client",
-          len(writes) == 1 and writes[0][0] == "POST"
-          and "jev-tag:v1" in writes[0][2]["body"]
+          len(writes) == 2
+          and all(w[0] == "POST" for w in writes)
+          and any("jev-tag:v1" in w[2]["body"] for w in writes)
+          and any(w[2]["body"] == "@codex security review"
+                  for w in writes)
           and main_gh.sticky_writes() == [])
 
     # --- fallback: no PAT wired, owner marker is not trusted and
@@ -935,14 +955,17 @@ def v21_tests():
                          comments=[owner_marker(state0)])
     writes = main_gh.sticky_writes()
     check("fallback: workflow token, fresh sticky POST",
-          len(writes) == 1 and writes[0][0] == "POST"
+          len(writes) == 2
+          and all(w[0] == "POST" for w in writes)
+          and any("jev-tag:v1" in w[2]["body"] for w in writes)
           and out["sticky_identity"] == "workflow-token")
 
     # --- re-render dedupe: a second run PATCHes the same sticky
     # and the escalation section survives exactly once
     gh1 = RecGh()
     apply_decision(gh1, bundle, dict(d_full), comments=[])
-    posted = gh1.sticky_writes()[0][2]["body"]
+    posted = [w[2]["body"] for w in gh1.sticky_writes()
+              if "jev-tag:v1" in (w[2].get("body") or "")][0]
     round1 = {"id": 555, "user": {"login": "github-actions[bot]"},
               "body": posted}
     gh2 = RecGh()
@@ -985,10 +1008,15 @@ def v21_tests():
                          comments=[bot_marker],
                          mention_gh=pat_gh, mention_login="ownerx")
     writes = pat_gh.sticky_writes()
+    sticky_body = [w[2]["body"] for w in writes
+                   if "jev-tag:v1" in (w[2].get("body") or "")][0]
     deletes = [c for c in main_gh.calls if c[0] == "DELETE"]
     check("escalation supersedes: owner POST + old sticky deleted",
-          len(writes) == 1 and writes[0][0] == "POST"
-          and [ln for ln in writes[0][2]["body"].splitlines()
+          len(writes) == 2
+          and all(w[0] == "POST" for w in writes)
+          and any(w[2]["body"] == "@codex security review"
+                  for w in writes)
+          and [ln for ln in sticky_body.splitlines()
                if ln == "@codex security review"]
           == ["@codex security review"]
           and len(deletes) == 1
@@ -1037,6 +1065,281 @@ def v21_tests():
     return 0 if ok else 1
 
 
+def v22_tests():
+    """v2.2.0 top-5: retry + abstain, docs-only gate, Layer 1
+    refinement, standalone Codex comment discipline, dedicated
+    security call state, escalation concurrence."""
+    ok = True
+
+    def check(name, cond):
+        nonlocal ok
+        print(("PASS " if cond else "FAIL ") + name)
+        ok = ok and bool(cond)
+
+    plain = {"hits": [], "any": False, "critical": False,
+             "categories": [], "hard": False, "security_hard": False}
+
+    def mk_bundle(**over):
+        b = {"repo": "webuildstuffio/x", "pr_number": 3,
+             "pr_title": "t", "pr_body": "", "pr_author": "a",
+             "pr_labels": [], "files": [], "issue": None,
+             "tier": "flagship", "readme": "", "agents": "",
+             "repo_labels": None}
+        b.update(over)
+        return b
+
+    def mk_answers(**over):
+        a = {"security_related": {"type": "noul", "noul": 0.1},
+             "security_category": {"type": "choice", "choice": "none",
+                                   "probabilities": {"none": 0.9}},
+             "blast_radius": {"type": "score", "score": 1.0},
+             "change_type": {"type": "choice", "choice": "feature",
+                             "probabilities": {"feature": 0.9}},
+             "priority": {"type": "choice", "choice": "P2",
+                          "probabilities": {"P2": 0.8}}}
+        a.update(over)
+        return {"answers": a}
+
+    # --- G1: call_jev retry semantics (failure-mode coverage that
+    # did not exist before v2.2.0)
+    calls = {"n": 0}
+
+    def flaky(state, key, questions, timeout):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise JevError("Jev HTTP 503")
+        return {"answers": {}}
+
+    out = call_jev("s", "k", _once=flaky, _sleep=lambda s: None)
+    check("retry succeeds on the third attempt",
+          out == {"answers": {}} and calls["n"] == 3)
+    calls["n"] = 0
+
+    def always_fail(state, key, questions, timeout):
+        calls["n"] += 1
+        raise JevError("Jev HTTP 500")
+
+    try:
+        call_jev("s", "k", _once=always_fail, _sleep=lambda s: None)
+        raised = False
+    except JevError:
+        raised = True
+    check("retry exhausts at 3 attempts then raises",
+          raised and calls["n"] == 3)
+    sleeps = []
+    try:
+        call_jev("s", "k", _once=always_fail, _sleep=sleeps.append)
+    except JevError:
+        pass
+    check("retry backs off between attempts", sleeps == [2.0, 4.0])
+    try:
+        call_jev("s", "", _once=always_fail, _sleep=lambda s: None)
+        raised = False
+    except JevError:
+        raised = True
+    check("missing key fails before any attempt", raised)
+
+    # --- G1: abstain on degraded runs
+    d = decide(mk_bundle(), plain, None)
+    check("degraded run abstains: no labels at all without a "
+          "Layer 1 stamp", d["abstained"] is True
+          and d["labels_desired"] == [])
+    l1_sec = layer1({"files": [{"path": "src/auth/login.ts",
+                                "additions": 5, "deletions": 1}],
+                     "pr_title": "t", "pr_body": "", "issue": None})
+    d = decide(mk_bundle(), l1_sec, None)
+    check("degraded run keeps only the Layer 1 security stamp",
+          d["abstained"] is True
+          and d["labels_desired"] == ["type:security"])
+    state0 = {"pr_applied": [], "issue_applied": [],
+              "issue_number": None, "codex_posted": False, "runs": 1}
+    body = marker_body(state0, d, [], [], False)
+    check("abstained sticky is flagged model-unavailable",
+          "Model unavailable" in body and "abstained" in body)
+
+    # --- G2: docs-only gate
+    doc_files = [{"path": "skills/fleet-cloudflare/WAF.md",
+                  "additions": 40, "deletions": 5},
+                 {"path": "docs/security-baseline.md",
+                  "additions": 10, "deletions": 0}]
+    check("docs_only detects an all-prose PR",
+          docs_only(mk_bundle(files=doc_files)) is True
+          and docs_only(mk_bundle(files=doc_files + [
+              {"path": "src/a.ts", "additions": 1, "deletions": 0}
+          ])) is False)
+    check("doc basename prefixes do not swallow code files",
+          docs_only(mk_bundle(files=[
+              {"path": "src/security.ts", "additions": 3,
+               "deletions": 0}])) is False
+          and docs_only(mk_bundle(files=[
+              {"path": "SECURITY.md", "additions": 3,
+               "deletions": 0}])) is True)
+    l1_doc = layer1({"files": doc_files, "pr_title": "t",
+                     "pr_body": "", "issue": None})
+    d = decide(mk_bundle(files=doc_files), l1_doc, mk_answers(
+        security_related={"type": "noul", "noul": 0.71},
+        security_category={"type": "choice", "choice": "infra-CI",
+                           "probabilities": {"infra-CI": 0.8}}))
+    check("docs gate: model route cannot stamp, band, or post",
+          d["docs_only_gate"] is True
+          and d["security_type_warranted"] is False
+          and "security" not in d["types"]
+          and d["security_band"] == "low"
+          and d["codex_post"] is False)
+    doc_l1_files = [{"path": "docs/auth/login-flow.md",
+                     "additions": 9, "deletions": 1}]
+    l1_dl = layer1({"files": doc_l1_files, "pr_title": "t",
+                    "pr_body": "", "issue": None})
+    d = decide(mk_bundle(files=doc_l1_files), l1_dl, mk_answers(
+        security_related={"type": "noul", "noul": 0.1}))
+    check("docs gate: a Layer 1 warrant on a doc path still stamps",
+          d["security_type_warranted"] is True
+          and "security" in d["types"])
+    d = decide(mk_bundle(files=doc_files), l1_doc, mk_answers(
+        security_related={"type": "noul", "noul": 0.71},
+        secrets_in_text={"type": "noul", "noul": 0.9}))
+    check("docs gate lifts when pasted secrets are detected",
+          d["docs_only_gate"] is False
+          and d["security_type_warranted"] is True)
+
+    # --- G3: Layer 1 refinement
+    script_patch = ("@@ -3,7 +3,7 @@\n"
+                    "   \"scripts\": {\n"
+                    "-    \"build\": \"vite build\",\n"
+                    "+    \"build\": \"vite build --minify\",\n")
+    l1_m = layer1({"files": [{"path": "package.json", "additions": 1,
+                              "deletions": 1, "patch": script_patch}],
+                   "pr_title": "t", "pr_body": "", "issue": None})
+    check("manifest stays security evidence (version-diff rule "
+          "dropped after replay collateral)",
+          "dependencies" in l1_m["categories"]
+          and l1_m["security_hard"] is True)
+    bump_patch = ("@@ -10,7 +10,7 @@\n"
+                  "-    \"react\": \"^18.2.0\",\n"
+                  "+    \"react\": \"^18.3.1\",\n")
+    l1_m2 = layer1({"files": [{"path": "package.json", "additions": 1,
+                              "deletions": 1, "patch": bump_patch}],
+                    "pr_title": "t", "pr_body": "", "issue": None})
+    check("manifest version bump stays security evidence",
+          l1_m2["security_hard"] is True)
+    l1_m3 = layer1({"files": [{"path": "package.json", "additions": 1,
+                              "deletions": 1}],
+                    "pr_title": "t", "pr_body": "", "issue": None})
+    check("manifest without a patch keeps the old behavior",
+          l1_m3["security_hard"] is True)
+    l1_i = layer1({"files": [
+        {"path": "infrastructure/db/seed.sql", "additions": 50,
+         "deletions": 0}], "pr_title": "t", "pr_body": "",
+        "issue": None})
+    check("infra directory alone demoted to evidence-only",
+          "infra-CI" in l1_i["categories"]
+          and l1_i["security_hard"] is False)
+    l1_i2 = layer1({"files": [
+        {"path": "src/shared/infrastructure/cache.ts", "additions": 5,
+         "deletions": 2}], "pr_title": "t", "pr_body": "",
+        "issue": None})
+    check("nested infrastructure dir also demoted",
+          l1_i2["security_hard"] is False)
+    l1_i3 = layer1({"files": [
+        {"path": "infrastructure/wrangler.toml", "additions": 5,
+         "deletions": 1}], "pr_title": "t", "pr_body": "",
+        "issue": None})
+    check("infra basename inside an infra dir still counts",
+          l1_i3["security_hard"] is True)
+    l1_s = layer1({"files": [{"path": "tests/session.rs",
+                              "additions": 5, "deletions": 1}],
+                   "pr_title": "t", "pr_body": "", "issue": None})
+    check("session word scoped out of test paths",
+          "auth" not in l1_s["categories"]
+          and l1_s["security_hard"] is False)
+    l1_s2 = layer1({"files": [{"path": "src/session.rs",
+                              "additions": 5, "deletions": 1}],
+                    "pr_title": "t", "pr_body": "", "issue": None})
+    check("session word still matches outside test paths",
+          "auth" in l1_s2["categories"])
+
+    # --- G4: concurrence gates the post, never the label
+    d = decide(mk_bundle(), l1_sec, mk_answers(
+        security_related={"type": "noul", "noul": 0.2}))
+    check("low-P Layer 1 stamp: label stays, post withheld",
+          "security" in d["types"] and d["codex_post"] is False
+          and d["codex_concurrence"] is False)
+    d = decide(mk_bundle(), l1_sec, mk_answers(
+        security_related={"type": "noul", "noul": 0.5}))
+    check("concurrence at P >= 0.40 lets the Layer 1 post fire",
+          d["codex_post"] is True and d["codex_concurrence"] is True)
+    l1_crit = layer1({"files": [{"path": ".env.production",
+                                "additions": 1, "deletions": 0}],
+                      "pr_title": "t", "pr_body": "", "issue": None})
+    d = decide(mk_bundle(), l1_crit, mk_answers(
+        security_related={"type": "noul", "noul": 0.05}))
+    check("critical filename posts without concurrence",
+          d["codex_post"] is True)
+
+    # --- G5: dedicated security call state + sheet
+    q = security_questions(mk_bundle())
+    check("security sheet is exactly the security questions",
+          set(q) == {"security_related", "security_category",
+                     "blast_radius", "secrets_in_text"})
+    wf_patch = ("@@ -1,3 +1,4 @@\n"
+                "+permissions:\n+  id-token: write\n")
+    sec_bundle = mk_bundle(files=[
+        {"path": ".github/workflows/ci.yml", "additions": 2,
+         "deletions": 0, "patch": wf_patch},
+        {"path": "src/feature.ts", "additions": 9, "deletions": 0,
+         "patch": "@@ -1 +1 @@\n+const x = 1\n"}])
+    l1_wf = layer1(sec_bundle)
+    st = build_security_state(sec_bundle, l1_wf)
+    check("security state carries workflow patches only",
+          "id-token: write" in st and "const x = 1" not in st
+          and len(st.encode("utf-8")) <= STATE_BUDGET + 64)
+    big_patch = "\n".join(f"+line {i} " + "x" * 60
+                          for i in range(200))
+    cap_bundle = mk_bundle(files=[
+        {"path": ".github/workflows/a.yml", "additions": 200,
+         "deletions": 0, "patch": big_patch},
+        {"path": ".github/workflows/b.yml", "additions": 200,
+         "deletions": 0, "patch": big_patch}])
+    st = build_security_state(cap_bundle, layer1(cap_bundle))
+    check("security state stays under the state budget with "
+          "huge patches", len(st.encode("utf-8"))
+          <= STATE_BUDGET + 64)
+
+    # --- G13: standalone comment failure leaves the one-shot
+    # unspent (no delivery claimed, error recorded)
+    class StandaloneFailGh(RecGh):
+        def call(self, method, path, body=None, ok_missing=False):
+            if (method == "POST" and path.endswith("/comments")
+                    and (body or {}).get("body")
+                    == "@codex security review"):
+                raise GhError("403: cannot post standalone")
+            return super().call(method, path, body, ok_missing)
+
+    auth_hit = {"kind": "path", "match": "src/auth/login.ts",
+                "category": "auth", "critical": False}
+    d_full = {"labels_desired": ["P1", "type:security"],
+              "codex_post": True, "security_band": "high",
+              "p_security_jev": 0.93, "blast_radius": 4,
+              "security_category": "auth", "perf_flag": False,
+              "themes": [], "effort": None,
+              "layer1": {"any": True, "hits": [auth_hit]}}
+    bundle7 = {"repo": "o/r", "pr_number": 7, "pr_labels": [],
+               "issue": None, "repo_labels": None}
+    gh = StandaloneFailGh()
+    out = apply_decision(gh, bundle7, dict(d_full), comments=[])
+    check("standalone failure: no delivery claimed, one-shot "
+          "unspent, error recorded",
+          out["codex_posted_now"] is False
+          and out["codex_standalone_posted"] is False
+          and any("standalone" in e for e in out["errors"]))
+    print("V22-TEST " + ("OK" if ok else "FAILED"))
+    return 0 if ok else 1
+
+
 if __name__ == "__main__":
-    sys.exit(1 if (self_test() or apply_tests() or v2_tests()
-                   or v21_tests()) else 0)
+    # Run EVERY suite and aggregate: the old `or` chain silently
+    # skipped later suites whenever an early one failed (plan
+    # finding, fixed in v2.2.0).
+    results = [self_test(), apply_tests(), v2_tests(), v21_tests(),
+               v22_tests()]
+    sys.exit(1 if any(results) else 0)
