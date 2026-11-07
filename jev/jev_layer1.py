@@ -141,6 +141,11 @@ def is_doc_path(path):
         return True
     if any(c in ("docs", "doc", "documentation") for c in comps[:-1]):
         return True
+    # Well-known prose basenames count only with a doc extension
+    # or none: a code file that merely starts with one of the
+    # prefixes (security.ts, license.js) is not prose.
+    if ext and ext not in DOC_EXTS:
+        return False
     return any(base.startswith(p) for p in DOC_BASENAME_PREFIXES)
 
 

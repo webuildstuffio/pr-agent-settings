@@ -1167,6 +1167,13 @@ def v22_tests():
           and docs_only(mk_bundle(files=doc_files + [
               {"path": "src/a.ts", "additions": 1, "deletions": 0}
           ])) is False)
+    check("doc basename prefixes do not swallow code files",
+          docs_only(mk_bundle(files=[
+              {"path": "src/security.ts", "additions": 3,
+               "deletions": 0}])) is False
+          and docs_only(mk_bundle(files=[
+              {"path": "SECURITY.md", "additions": 3,
+               "deletions": 0}])) is True)
     l1_doc = layer1({"files": doc_files, "pr_title": "t",
                      "pr_body": "", "issue": None})
     d = decide(mk_bundle(files=doc_files), l1_doc, mk_answers(
