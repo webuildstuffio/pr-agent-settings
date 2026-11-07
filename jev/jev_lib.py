@@ -6,25 +6,23 @@ pinned SHA. Python 3 standard library only."""
 
 import json
 import os
-import re
+import time
 import urllib.error
 import urllib.request
 
 
-SCHEMA_PRIORITIES = ["P0", "P1", "P2", "P3", "P4"]
-SCHEMA_TYPES = [
-    "bug", "feature", "refactor", "security", "ci", "test", "docs",
-    "question", "duplicate",
-]
-SCHEMA_THEMES = [
-    "seo", "traffic", "analytics", "performance", "content", "revenue",
-    "ux", "data", "infra", "cost", "pwa", "mcp",
-]
-SCHEMA_EFFORTS = ["effort:xs", "effort:s", "effort:m", "effort:l",
-                  "effort:xl"]
-SEC_CATEGORIES = ["auth", "secrets", "dependencies", "infra-CI",
-                  "data-PII", "payments", "none"]
-TIERS = ["flagship", "active", "casual", "dormant", "retired"]
+# Re-exports (v2.2.0 module split): jev_tag.py and the tests
+# import these names from jev_lib, as they did before the split.
+from jev_layer1 import (DEP_MANIFESTS, SCHEMA_EFFORTS,
+                        SCHEMA_PRIORITIES, SCHEMA_THEMES,
+                        SCHEMA_TYPES, SEC_CATEGORIES, docs_only,
+                        repo_specialties)
+from jev_layer1 import TIERS as TIERS
+from jev_layer1 import layer1 as layer1
+from jev_sheet import QUESTIONS
+from jev_sheet import SECURITY_QUESTION_KEYS as SECURITY_QUESTION_KEYS
+from jev_sheet import build_questions as build_questions
+from jev_sheet import security_questions as security_questions
 
 OWNER_LABEL_MIN = 0.90        # noul needed for owner-decision / -mustdo
 THEME_MIN = 0.30              # min choice probability per applied theme
@@ -47,7 +45,25 @@ STATE_BUDGET = 27000          # bytes; Jev long-context mode starts ~32k
 # on their own (folio-app #3118, +8h audit 2026-10-28).
 # v2.1.0 = Codex mention folded into the sticky (delimited section,
 # not a separate comment); sticky uses the JEV_MENTION_PAT token.
-VERSION = "2.1.0"
+# v2.2.0 = the top-5 improvement package (jev-plan 2026-11-06):
+# (1) call_jev retries (3 attempts, ~20s timeouts, backoff) and a
+# degraded run ABSTAINS (no labels beyond a Layer 1 security stamp,
+# sticky flagged model-unavailable) instead of applying the
+# fallback set the audit scored 0/24; (2) docs-only gate: prose
+# ABOUT security cannot earn a model-route security stamp, plus
+# hard-negative criteria text; (3) Layer 1 refinement: an
+# infra-directory hit alone is evidence-only, and session words
+# are scoped out of test paths (a third sub-rule, manifest
+# version-diff, was built and dropped before release after the
+# pilot replay showed collateral against warranted stamps); (4)
+# escalation also posts ONE standalone `@codex security review`
+# comment (the shape proven on repo-review #680 and megahealth
+# #131; the in-sticky mention alone is ignored by Codex); (5)
+# security questions move to a dedicated call whose state carries
+# targeted patch snippets, and the Codex post requires model
+# concurrence at P >= 0.40 (the security LABEL keeps its old
+# rule; concurrence there was simulated net-negative).
+VERSION = "2.2.0"
 
 # Fleet label schema v4.2 generic set (53). Anything in a repo's live
 # label list NOT in this set counts as a repo specialty label.
@@ -77,20 +93,6 @@ ESCALATION_MIN_LINES = 400    # gate: large diff by changed lines...
 ESCALATION_MIN_FILES = 15     # ...or by file count
 
 
-def repo_specialties(repo_labels):
-    """Specialty catalog {name: description} from a repo's live label
-    list, or {} when the list is unavailable or has no specialties."""
-    if not isinstance(repo_labels, list):
-        return {}
-    out = {}
-    for item in repo_labels:
-        if not isinstance(item, dict):
-            continue
-        name = item.get("name")
-        if name and name not in GENERIC_LABELS:
-            out[name] = (item.get("description") or "").strip()
-    return out
-
 JEV_URL = "https://openrouter.ai/api/alpha/decisions"
 JEV_MODEL = os.environ.get("JEV_MODEL", "typesafe/jev-1.14")
 
@@ -106,297 +108,7 @@ def trunc_bytes(text, limit):
 
 
 
-# ------------------------------------------------------------- Layer 1
 
-# Layer 1 matches on PATH SEMANTICS only: a directory component or
-# a filename-stem word (stems split on - and _) must EQUAL a category
-# word. Filename substrings never match. There is deliberately NO
-# text/keyword scan of titles or bodies: Jev reads the text itself,
-# and word matching misfired in production (the word "token" in
-# design-token prose applied type:security to repo-review #488).
-# The one exception to whole-word matching is the exact sensitive-
-# filename allowlist below (.env*, key material, credential files);
-# hits there are "critical".
-COMPONENT_WORDS = [
-    ("auth", {"auth", "authentication", "oauth", "oauth2", "login",
-              "logout", "signin", "signup", "session", "sessions",
-              "password", "passwords", "permission", "permissions",
-              "rbac", "authorization", "access", "credential",
-              "credentials"}),
-    ("secrets", {"crypto", "encrypt", "encryption", "decrypt",
-                 "decryption", "signing", "secret", "secrets", "key",
-                 "keys", "keystore"}),
-    ("payments", {"payment", "payments", "billing", "checkout",
-                  "stripe", "invoice", "invoices", "subscription",
-                  "subscriptions"}),
-    ("data-PII", {"user", "users", "account", "accounts", "pii",
-                  "personal", "gdpr", "migration", "migrations",
-                  "d1"}),
-]
-# The data-PII vocabulary mixes two kinds of words. PERSON words
-# (user, account, pii, ...) mean the path plausibly carries
-# personal data: security evidence. TECH words (d1, migration)
-# and the bare .sql extension only say a data layer is involved:
-# data evidence, NOT security evidence. folio-app #3118 (price
-# history guards; the sole hit was the "d1" in price-history-d1.ts,
-# Jev P(security) 0.14) got type:security + a high band + a Codex
-# post from a tech word alone.
-PERSON_DATA_WORDS = {"user", "users", "account", "accounts",
-                     "pii", "personal", "gdpr"}
-TECH_DATA_WORDS = {"migration", "migrations", "d1"}
-WEBHOOK_WORDS = {"webhook", "webhooks"}
-UPLOAD_WORDS = {"upload", "uploads", "multipart"}
-INFRA_DIRS = {"terraform", "infra", "infrastructure"}
-INFRA_BASENAMES = {"wrangler.toml", "wrangler.json", "wrangler.jsonc",
-                   "cloudflare.config.ts"}
-SENSITIVE_STEMS = {"credentials", "credential"}
-SENSITIVE_BASENAMES = {"id_rsa", "id_ed25519", "id_dsa", "id_ecdsa"}
-SENSITIVE_EXTS = {".pem", ".key", ".p12", ".pfx"}
-DEP_MANIFESTS = {
-    "package.json", "bun.lock", "bun.lockb", "cargo.toml", "cargo.lock",
-    "go.mod", "go.sum", "requirements.txt", "pyproject.toml", "pipfile",
-    "gemfile", "gemfile.lock", "composer.json", "composer.lock",
-    "pom.xml", "build.gradle", "yarn.lock", "pnpm-lock.yaml",
-    "package-lock.json", "uv.lock",
-}
-
-
-def _path_categories(path):
-    """(categories, critical, security_categories) for one changed
-    path, by directory semantics: whole directory components and
-    whole filename-stem words only. Design-token files (styling
-    values) get no stem-word matches, so token semantics can never
-    create evidence on their own; directory words and the exact
-    basename/extension rules still apply to them.
-    security_categories is the subset of categories that count as
-    SECURITY evidence: every category except a data-PII hit whose
-    only matched words are tech words (or the bare .sql rule)."""
-    comps = [c for c in path.lower().split("/") if c]
-    if not comps:
-        return set(), False, set()
-    base = comps[-1]
-    stem = base.rsplit(".", 1)[0] if "." in base else base
-    ext = "." + base.rsplit(".", 1)[1] if "." in base else ""
-    design_token = (stem == "tokens"
-                    or stem.endswith(("-tokens", "_tokens",
-                                      ".tokens"))
-                    or "design-token" in stem
-                    or "design-tokens" in comps
-                    or "design_tokens" in comps)
-    words = set()
-    for comp in comps[:-1]:
-        words.add(comp)
-        words.update(re.split(r"[-_]", comp))
-    if not design_token:
-        # Dots split too: dotted compound stems (auth.service.ts,
-        # login.page.tsx) carry their category word as a whole
-        # dot-delimited segment. Whole-word semantics are kept:
-        # tokenizer.ts and keyboard.config.ts still never match.
-        words.update(re.split(r"[-_.]", stem))
-    cats = set()
-    crit = False
-    if comps[:2] == [".github", "workflows"]:
-        cats.add("infra-CI")
-    if base in DEP_MANIFESTS:
-        cats.add("dependencies")
-    if (base == ".env" or base.startswith(".env.")
-            or ext in SENSITIVE_EXTS
-            or base in SENSITIVE_BASENAMES
-            or stem in SENSITIVE_STEMS):
-        cats.add("secrets")
-        crit = True
-    for cat, vocab in COMPONENT_WORDS:
-        if words & vocab:
-            cats.add(cat)
-    if words & WEBHOOK_WORDS or words & UPLOAD_WORDS:
-        cats.add("infra-CI")
-    if ext == ".sql":
-        cats.add("data-PII")
-    if (any(c in INFRA_DIRS for c in comps[:-1])
-            or base in INFRA_BASENAMES or ext in (".tf", ".tfvars")
-            or base == "dockerfile" or base.startswith("dockerfile.")
-            or base == "docker-compose"
-            or base.startswith("docker-compose.")):
-        cats.add("infra-CI")
-    sec_cats = set(cats)
-    if "data-PII" in sec_cats and not (words & PERSON_DATA_WORDS):
-        # Matched only by tech words (d1, migration) and/or the
-        # .sql extension rule above: data evidence only.
-        sec_cats.discard("data-PII")
-    return cats, crit, sec_cats
-
-
-def layer1(bundle):
-    """Deterministic PATH evidence: per-category matched file lists.
-    Every hit is a "hard" hit (paths only; there is no text scan).
-    `security_hard` is the subset of hits that count as security
-    evidence (see _path_categories): only security_hard bands
-    security high, warrants the security type and posts Codex on
-    its own; a tech-only data-PII hit is recorded as evidence but
-    does none of those. `critical` marks the sensitive-filename
-    allowlist (.env*, key material, credential files)."""
-    hits = []
-    evidence = {}
-    critical = False
-    security_any = False
-    for f in bundle["files"]:
-        path = f["path"]
-        cats, crit, sec_cats = _path_categories(path)
-        critical = critical or crit
-        if sec_cats:
-            security_any = True
-        for cat in sorted(cats):
-            hits.append({"kind": "path", "match": path,
-                         "category": cat, "critical": crit})
-            evidence.setdefault(cat, []).append(path)
-    seen, uniq = set(), []
-    for h in hits:
-        key = (h["match"], h["category"])
-        if key not in seen:
-            seen.add(key)
-            uniq.append(h)
-    return {
-        "hits": uniq[:40],
-        "evidence": {cat: paths[:10]
-                     for cat, paths in sorted(evidence.items())},
-        "any": len(uniq) > 0,
-        "critical": critical,
-        # Kept for decide() and the record format: every Layer 1
-        # hit is a path hit, so hard == any.
-        "hard": len(uniq) > 0,
-        "security_hard": security_any,
-        "categories": sorted(evidence),
-    }
-
-
-# ------------------------------------------------------------------ Jev
-
-QUESTIONS = {
-    "security_related": {
-        "type": "noul",
-        "instructions": "The pull request (its text, linked issue, and changed files) is related to security: authentication, authorization, secrets, vulnerabilities, permissions, data protection, or attack surface.",
-    },
-    "security_category": {
-        "type": "choice",
-        "instructions": "Which security area does this pull request most concern? Pick none if it is not security-related.",
-        "criteria": {
-            "auth": "Login, sessions, tokens, permissions, access control",
-            "secrets": "Keys, credentials, encryption, leaked secrets, vulnerabilities and exploits",
-            "dependencies": "Dependency manifests, lockfiles, supply chain",
-            "infra-CI": "CI workflows, deploys, hosting, webhooks, infrastructure",
-            "data-PII": "Databases, migrations, personal data, privacy",
-            "payments": "Payments, billing, checkout, subscriptions",
-            "none": "Not security-related",
-        },
-    },
-    "blast_radius": {
-        "type": "score",
-        "instructions": "If this change is wrong or malicious, how bad is the blast radius?",
-        "criteria": [
-            "1 - Cosmetic or docs only; no runtime effect",
-            "2 - Small contained change; one feature or page affected",
-            "3 - Moderate; a subsystem, data flow, or many users affected",
-            "4 - Large; core product behavior, stored data, or security posture affected",
-            "5 - Severe; credentials, payments, production access, or fleet-wide systems affected",
-        ],
-    },
-    "change_type": {
-        "type": "choice",
-        "instructions": "What kind of work is this pull request primarily?",
-        "criteria": {
-            "bug": "Fixes broken behavior, an error, a crash, or a regression",
-            "feature": "Adds new functionality or capability",
-            "refactor": "Restructures code without behavior change; cleanup, dedup, tech debt",
-            "security": "Hardens security, fixes a vulnerability, changes auth or permissions",
-            "ci": "CI, workflows, build, deploy, or developer tooling",
-            "test": "Adds or fixes tests or coverage only",
-            "docs": "Documentation, README, or copy only",
-            "question": "Asks a question or needs a decision; no code change intended",
-            "duplicate": "Duplicates another issue or pull request",
-        },
-    },
-    "priority": {
-        "type": "choice",
-        "instructions": "How urgent is this work for the repository, given its title, description, and linked issue?",
-        "criteria": {
-            "P0": "Critical: production down, data loss, or a critical security hole; drop everything",
-            "P1": "High: important bug, security, or CI work for this week",
-            "P2": "Medium: normal queued work",
-            "P3": "Low: real but not soon",
-            "P4": "Backlog: someday or maybe, no commitment",
-        },
-    },
-    "theme": {
-        "type": "choice",
-        "instructions": "Which work lane does this pull request belong to? Pick none if no lane clearly fits.",
-        "criteria": {
-            "seo": "Search or AI-search visibility, sitemap, indexing, meta, llms.txt",
-            "traffic": "Traffic growth, distribution, referrals",
-            "analytics": "Tracking, beacons, RUM, Search Console, measurement",
-            "performance": "Speed, Core Web Vitals, bundle size, caching",
-            "content": "Pages, copy, blog posts, landing content",
-            "revenue": "Ads, affiliate, pricing, conversion, paying users",
-            "ux": "User interface, design, accessibility, mobile experience",
-            "data": "Data pipelines, sources, integrity, datasets",
-            "infra": "Cloudflare, deploys, runners, domains, hosting",
-            "cost": "Spend: CI runners, AI or API usage, subscriptions",
-            "pwa": "PWA installability, manifest, service worker",
-            "mcp": "MCP servers, tools, or protocol work",
-            "none": "No clear work lane",
-        },
-    },
-    "effort": {
-        "type": "choice",
-        "instructions": "How much work does the linked issue or pull request represent?",
-        "criteria": {
-            "effort:xs": "Under 2 hours",
-            "effort:s": "About half a day",
-            "effort:m": "About 1-2 days",
-            "effort:l": "3 or more days",
-            "effort:xl": "Epic-sized; should be split",
-        },
-    },
-    "owner_decision": {
-        "type": "noul",
-        "instructions": "The repository owner personally must make a direction or judgment call (product, strategy, licensing, go or no-go) before this work can proceed.",
-    },
-    "owner_mustdo": {
-        "type": "noul",
-        "instructions": "The repository owner personally must perform an action only they can do: an account, console, dashboard, sign-in, API key, purchase, or manual verification step.",
-    },
-    "codex_worth": {
-        "type": "score",
-        "instructions": "How much would a premium, deep, paid code review add beyond a standard automated review for this change?",
-        "criteria": [
-            "0 - Nothing; trivial or mechanical change",
-            "1 - Little; small, well-understood change",
-            "2 - Some; normal change with a few risky spots",
-            "3 - A lot; complex logic, wide impact, subtle failure modes",
-            "4 - Essential; security-critical or safety-critical logic",
-        ],
-    },
-    "secrets_in_text": {
-        "type": "noul",
-        "instructions": "The pull request or issue text itself contains pasted secrets, API keys, passwords, tokens, or personal data.",
-    },
-    "low_risk": {
-        "type": "noul",
-        "instructions": "This change is low risk to merge: it cannot break production behavior (docs, copy, tests, or trivially safe edits only).",
-    },
-    "perf_risk": {
-        "type": "noul",
-        "instructions": "This change could degrade speed or responsiveness: slower or heavier queries or data access, larger bundle or payload, hot-path or render-path work, missing pagination or caching, or more computation per request.",
-    },
-    "user_impact": {
-        "type": "choice",
-        "instructions": "How does this change affect the product's users?",
-        "criteria": {
-            "invisible": "No user can see or feel any difference: internal refactor, tests, CI, or developer-only docs",
-            "visible": "Users can see a difference (interface, copy, layout, content) but behavior and contracts are unchanged",
-            "behavior-changing": "Behavior that users or API consumers rely on changes: flows, defaults, outputs, data, or permissions",
-        },
-    },
-}
 
 PERF_FLAG_MIN = 0.70          # P(perf risk) at/above this flags the PR
 ISSUE_READY_LOW_MAX = 0.40    # P(issue ready) below this flags the issue
@@ -462,37 +174,16 @@ def build_state(bundle, l1):
     return trunc_bytes("\n\n".join(parts), STATE_BUDGET)
 
 
-def build_questions(bundle):
-    """The job sheet for this run: the fixed QUESTIONS, plus the
-    linked-issue readiness question when there is one, plus (when
-    the live label list has specialties) a dynamic choice question
-    whose criteria ARE those labels plus a none option."""
-    questions = dict(QUESTIONS)
-    if bundle.get("issue"):
-        questions["issue_ready"] = {
-            "type": "noul",
-            "instructions": "The linked issue is specified well enough for someone to act on without guessing: it states the problem or goal, the expected behavior or acceptance criteria, and enough context, scope, or reproduction detail.",
-        }
-    catalog = repo_specialties(bundle.get("repo_labels"))
-    if catalog:
-        criteria = {name: (desc or "Repo-specific label")
-                    for name, desc in sorted(catalog.items())}
-        criteria["none"] = "No repo specialty label fits this change"
-        questions["specialty_labels"] = {
-            "type": "choice",
-            "instructions": ("Which of this repository's specialty "
-                             "labels best fit this pull request? Pick "
-                             "from the listed labels only; pick none "
-                             "if no specialty label clearly applies."),
-            "criteria": criteria,
-        }
-    return questions
 
 
-def call_jev(state, api_key, questions=None):
-    """One Decisions API request with the whole job sheet."""
-    if not api_key:
-        raise JevError("OPENROUTER_API_KEY is not set")
+JEV_ATTEMPTS = 3              # total attempts per call (v2.2.0 retry)
+JEV_TIMEOUT = 20              # seconds per attempt (was: one 90s try)
+JEV_BACKOFF = 2.0             # base seconds; doubles per retry
+
+
+def _call_jev_once(state, api_key, questions, timeout):
+    """A single Decisions API attempt. Raises JevError on any
+    HTTP, network, or malformed-response failure."""
     payload = {"model": JEV_MODEL, "state": state,
                "questions": questions or QUESTIONS}
     req = urllib.request.Request(
@@ -506,7 +197,7 @@ def call_jev(state, api_key, questions=None):
         method="POST")
     try:
         # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected -- req targets the hardcoded https JEV_URL constant; only the JSON payload varies
-        with urllib.request.urlopen(req, timeout=90) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8", "ignore"))
     except urllib.error.HTTPError as exc:
         raise JevError(f"Jev HTTP {exc.code}")
@@ -515,6 +206,80 @@ def call_jev(state, api_key, questions=None):
     if not isinstance(data.get("answers"), dict):
         raise JevError("Jev response has no answers object")
     return data
+
+
+def call_jev(state, api_key, questions=None, attempts=JEV_ATTEMPTS,
+             timeout=JEV_TIMEOUT, _sleep=None, _once=None):
+    """One Decisions API request, retried with backoff (v2.2.0).
+
+    The pre-2.2.0 single 90s attempt degraded 12.3% of runs in the
+    audit window and every degraded run applied a wrong fallback
+    set. Retries are bounded (3 attempts at ~20s), so the worst
+    case inside the Qodo job is about a minute, not 4.5 minutes of
+    naive 90s retries. Raises JevError after the last attempt; the
+    caller then ABSTAINS (see decide())."""
+    if not api_key:
+        raise JevError("OPENROUTER_API_KEY is not set")
+    sleep = _sleep if _sleep is not None else time.sleep
+    once = _once if _once is not None else _call_jev_once
+    last = None
+    for i in range(max(1, attempts)):
+        try:
+            return once(state, api_key, questions, timeout)
+        except JevError as exc:
+            last = exc
+            if i + 1 < max(1, attempts):
+                sleep(JEV_BACKOFF * (2 ** i))
+    raise last
+
+
+
+
+SNIPPET_TOTAL_BUDGET = 8000   # bytes of patch text, security call
+SNIPPET_PER_FILE = 2000       # bytes per file
+
+
+def _security_relevant(path, l1):
+    """A file whose patch belongs in the security call's state:
+    a workflow file, a dependency manifest, or any file with a
+    Layer 1 category hit."""
+    comps = [c for c in path.lower().split("/") if c]
+    if comps[:2] == [".github", "workflows"]:
+        return True
+    if comps and comps[-1] in DEP_MANIFESTS:
+        return True
+    evidence = (l1 or {}).get("evidence") or {}
+    return any(path in paths for paths in evidence.values())
+
+
+def build_security_state(bundle, l1):
+    """State for the dedicated security call: the main state
+    trimmed so the total stays under STATE_BUDGET, plus a patch
+    snippet section (security-relevant files only, deletions
+    included, capped per file and in total)."""
+    base = build_state(bundle, l1)
+    room = STATE_BUDGET - SNIPPET_TOTAL_BUDGET - 200
+    base = trunc_bytes(base, room)
+    snippets = []
+    used = 0
+    for f in bundle.get("files") or []:
+        patch = f.get("patch")
+        if not patch or not _security_relevant(f["path"], l1):
+            continue
+        if used >= SNIPPET_TOTAL_BUDGET:
+            break
+        cap = min(SNIPPET_PER_FILE, SNIPPET_TOTAL_BUDGET - used)
+        text = trunc_bytes(patch, cap)
+        snippets.append(f"--- {f['path']}\n{text}")
+        used += len(text.encode("utf-8"))
+    if not snippets:
+        return base
+    return base + ("\n\nPatch snippets for security-relevant files "
+                   "(unified diff excerpts; judge what the change "
+                   "actually does, not just the path):\n"
+                   + "\n".join(snippets))
+
+
 
 
 # -------------------------------------------------------------- Decide
@@ -609,10 +374,23 @@ def decide(bundle, l1, jev, prior=None):
     # existed fall back to hard.
     l1_sec = bool(l1.get("security_hard", l1.get("hard")))
     d["layer1_security_hard"] = l1_sec
-    if l1_sec or human_sec or (p_sec is not None and p_sec >= SEC_HIGH):
+    # v2.2.0 docs-only gate: when every changed file is prose and
+    # no pasted-secret detection fires, the MODEL route alone can
+    # neither band the PR nor warrant the security type nor post
+    # Codex: prose ABOUT security practices, baselines, or review
+    # policy is not a security change (7 of the 20 residual healthy
+    # errors in the 2026-11-04 dive, one replicated docs family
+    # stamped at P 0.60-0.77). Layer 1 and human warrants are
+    # deterministic and unaffected.
+    docs_gate = bool(docs_only(bundle)) and not l1["critical"] \
+        and not (secrets_txt is not None and secrets_txt >= SEC_HIGH)
+    d["docs_only_gate"] = docs_gate
+    model_bands = not docs_gate
+    if l1_sec or human_sec or (model_bands and p_sec is not None
+                               and p_sec >= SEC_HIGH):
         band = "high"
-    elif ((p_sec is not None and p_sec >= SEC_MID)
-          or (secrets_txt is not None and secrets_txt >= SEC_HIGH)):
+    elif (model_bands and ((p_sec is not None and p_sec >= SEC_MID)
+          or (secrets_txt is not None and secrets_txt >= SEC_HIGH))):
         band = "mid"
     elif p_sec is not None:
         band = "low"
@@ -636,21 +414,35 @@ def decide(bundle, l1, jev, prior=None):
     sec_type_warranted = (
         l1_sec or human_sec
         or (secrets_txt is not None and secrets_txt >= SEC_HIGH)
-        or (p_sec is not None and p_sec >= SEC_MID and cat_agrees))
+        or (not docs_gate and p_sec is not None and p_sec >= SEC_MID
+            and cat_agrees))
     d["security_type_warranted"] = bool(sec_type_warranted)
-    # The Codex post fires on a SECURITY hard Layer 1 hit or a high Jev
-    # probability (the spec's post rule), or on the spec's mid-band
-    # blast upgrade: Jev probability in the mid range with blast
-    # radius >= 4, whatever else set the band. The human-label
+    # The Codex post (v2.2.0): the pre-2.2.0 rule fired on ANY
+    # security-hard Layer 1 hit alone, which is where the false
+    # positives concentrated (healthy trigger precision 58.0%).
+    # The post now requires MODEL CONCURRENCE: the (dedicated
+    # security call's) P(security) at SEC_MID or more, on top of a
+    # post route (Layer 1 security hit, high P, or mid P with
+    # blast >= 4). A critical-filename hit (.env, key material)
+    # posts without concurrence: deterministic, model-independent.
+    # The security LABEL above deliberately keeps its old rule:
+    # concurrence on the label was simulated net-negative (it
+    # breaks 20 warranted low-P stamps to fix 9). The human-label
     # floor raises the band for labels, but does not post on its
-    # own, and the floor must never suppress an escalation Jev's
-    # own signals earned.
-    codex_post = (
+    # own, and must never suppress an escalation Jev earned.
+    concurrence = p_sec is not None and p_sec >= SEC_MID
+    d["codex_concurrence"] = bool(concurrence)
+    post_route = (
         l1_sec
         or (p_sec is not None and p_sec >= SEC_HIGH)
         or (p_sec is not None and p_sec >= SEC_MID
             and blast is not None and blast >= 4))
-    d["codex_post"] = bool(codex_post)
+    if docs_gate:
+        # Under the docs gate only the deterministic route remains.
+        post_route = l1_sec
+    codex_post = bool((post_route and concurrence)
+                      or l1["critical"])
+    d["codex_post"] = codex_post
 
     # --- types (1-3)
     types = []
@@ -817,6 +609,16 @@ def decide(bundle, l1, jev, prior=None):
     desired.extend(specialty_picks)
     if d["user_facing_label"]:
         desired.append(d["user_facing_label"])
+    # v2.2.0 ABSTAIN: when the model call failed (jev is None, after
+    # retries), the run applies NOTHING beyond a Layer 1 security
+    # stamp. The pre-2.2.0 degraded path applied a manufactured set
+    # (tier-clamped default priority plus the stamp) that the audit
+    # scored wrong 24 of 24. The full decision stays in the record
+    # for diagnosis; only the applied set is gated, and the sticky
+    # flags the run as model-unavailable.
+    d["abstained"] = jev is None
+    if d["abstained"]:
+        desired = [x for x in desired if x == "type:security"]
     d["labels_desired"] = desired
     return d
 

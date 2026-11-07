@@ -8,7 +8,9 @@ the label job sheet in one request, then (in --mode apply) adds
 schema-v4.2 labels to the PR and its linked issue. When the
 security post rule fires, the `@codex security review` trigger is
 rendered once as a delimited section inside the sticky comment
-(never as a separate comment). The sticky is created/PATCHed
+AND (v2.2.0) posted once as a standalone comment containing only
+the trigger line: controlled probes proved Codex ignores the
+in-sticky mention and answers the standalone one. The sticky is created/PATCHed
 with the JEV_MENTION_PAT token when the wiring provides it, so
 the mention is authored by the token's owner (a connected Codex
 user) instead of github-actions[bot], whose mentions Codex
@@ -32,9 +34,15 @@ import sys
 import urllib.error
 import urllib.request
 
-from jev_lib import (ESCALATION_COMMENT, GENERIC_LABELS, TIERS,
-                     VERSION, JevError, build_questions, build_state,
-                     call_jev, decide, layer1, plan_labels)
+from jev_lib import (SECURITY_QUESTION_KEYS, TIERS, JevError,
+                     build_questions, build_security_state, build_state,
+                     call_jev, decide, layer1, plan_labels,
+                     security_questions)
+from jev_present import escalation_comment, marker_body
+from jev_present import match_user_facing_label
+# Re-exports for the tests, which import these from jev_tag.
+from jev_present import codex_focus as codex_focus
+from jev_present import escalation_section as escalation_section
 
 GH_API = "https://api.github.com"
 MARKER_RE = re.compile(r"<!-- jev-tag:v1 (\{.*?\}) -->", re.DOTALL)
@@ -125,7 +133,7 @@ def fetch_bundle(gh, repo, pr_number, workdir):
         "pr_body": pr.get("body") or "",
         "pr_author": (pr.get("user") or {}).get("login") or "",
         "pr_labels": [lab["name"] for lab in pr.get("labels") or []],
-        "files": [{"path": f.get("filename") or "", "additions": f.get("additions") or 0, "deletions": f.get("deletions") or 0} for f in files],
+        "files": [{"path": f.get("filename") or "", "additions": f.get("additions") or 0, "deletions": f.get("deletions") or 0, "patch": f.get("patch") or ""} for f in files],
         "issue": None,
         "tier": "casual",
         "readme": "",
@@ -200,236 +208,8 @@ def find_marker(comments, extra_authors=()):
                 continue
     return None, {"pr_applied": [], "issue_applied": [],
                   "issue_number": None, "codex_posted": False,
+                  "codex_standalone_posted": False,
                   "runs": 0}
-
-
-BAND_DOTS = {"high": "🔴", "mid": "🟡", "low": "🟢"}
-
-
-def marker_body(state, d, adds_pr, adds_issue, codex_now,
-                issue_number=None, skipped=None, escalated=False):
-    """The sticky status comment: compact and scannable (a reviewer
-    should read it in ~5 seconds). The machine state stays hidden in
-    the HTML-comment marker; nothing raw is rendered."""
-    band = d.get("security_band") or "unknown"
-    lines = [f"{BAND_DOTS.get(band, '⚪')} **Jev tagging (pilot)**"]
-    if adds_pr:
-        lines.append("**PR labels:** "
-                     + ", ".join(f"`{x}`" for x in adds_pr))
-    else:
-        lines.append("**PR labels:** no changes")
-    if issue_number:
-        if adds_issue:
-            lines.append(f"**Issue #{issue_number} labels:** "
-                         + ", ".join(f"`{x}`" for x in adds_issue))
-        else:
-            lines.append(f"**Issue #{issue_number} labels:** no changes")
-    else:
-        lines.append("🔗 No linked issue found, so labels were "
-                     "applied to the PR only")
-    p = d.get("p_security_jev")
-    ptxt = f"{p:.2f}" if isinstance(p, (int, float)) else "n/a"
-    blast = d.get("blast_radius")
-    sec = (f"🔒 Security: band **{band}** · P {ptxt} · "
-           f"blast {blast if blast is not None else '—'}")
-    cat = d.get("security_category")
-    if cat and cat != "none":
-        sec += f" · area: {cat}"
-    l1 = d.get("layer1") or {}
-    if l1.get("any"):
-        hits = ", ".join(_code_span(h["match"])
-                         for h in l1["hits"][:2])
-        sec += f" · rule hits: {hits}"
-    if codex_now:
-        sec += " · Codex review **requested**"
-    elif d.get("codex_posted_before"):
-        sec += " · Codex review already requested"
-    elif d.get("codex_post"):
-        sec += " · Codex review due (already present)"
-    lines.append(sec)
-    if escalated:
-        # Body rebuilt from scratch per render: exactly one section.
-        lines.extend(escalation_section(d))
-    themes = d.get("themes") or []
-    eff = d.get("effort")
-    lines.append("🏷️ Themes: "
-                 + (", ".join(themes) if themes else "—")
-                 + f" · Effort: {eff or '—'}")
-    if d.get("perf_flag"):
-        pp = d.get("p_perf_risk")
-        lines.append(f"⚡ Perf risk flagged (P {pp:.2f}): possible "
-                     "speed impact, worth a second look")
-    if d.get("issue_ready_low"):
-        rp = d.get("p_issue_ready")
-        lines.append(f"🧩 Linked issue may be underspecified "
-                     f"(readiness P {rp:.2f})")
-    if d.get("user_impact") in ("visible", "behavior-changing"):
-        ui_line = f"👀 User impact: **{d['user_impact']}**"
-        if d.get("user_facing_label"):
-            ui_line += f" · label `{d['user_facing_label']}` applied"
-        else:
-            ui_line += " · no user-facing label in this repo"
-        lines.append(ui_line)
-    notes = list(skipped or [])
-    esc = d.get("escalation") or {}
-    if esc.get("would_fire"):
-        # Deliberately NOT phrased as a mention: the note itself must
-        # never trigger the workflow it describes.
-        notes.append("deep-review escalation would fire "
-                     "(record-only, not posted)")
-    if notes:
-        shown = notes[:4]
-        if len(notes) > 4:
-            shown.append(f"+{len(notes) - 4} more")
-        lines.append("<sub>Skipped/notes: " + "; ".join(shown)
-                     + "</sub>")
-    lines.append(f"<sub>jev-tag v{VERSION}</sub>")
-    payload = json.dumps(state, separators=(",", ":"), sort_keys=True)
-    return f"<!-- jev-tag:v1 {payload} -->\n" + "\n".join(lines)
-
-
-# ------------------------------------------------------- Presentation
-
-# Deterministic matcher for a repo's user-facing label (must exist in
-# the live list; never invented). Names match the full pattern;
-# descriptions match only explicit phrases, so a stray "UI" in an
-# area label's description cannot hijack the pick.
-USER_FACING_NAME_RE = re.compile(
-    r"user[- ]?facing|customer[- ]?facing|end[- ]?user|front[- ]?end"
-    r"|\bux\b|\bui\b", re.IGNORECASE)
-USER_FACING_DESC_RE = re.compile(
-    r"user[- ]?facing|customer[- ]?facing|end[- ]?user", re.IGNORECASE)
-
-
-def match_user_facing_label(repo_labels):
-    """The repo's user-facing label name from its live label list, or
-    None. Specialty (non-generic) labels win over generic ones; ties
-    break alphabetically so the pick is deterministic."""
-    if not isinstance(repo_labels, list):
-        return None
-    matches = []
-    for item in repo_labels:
-        if not isinstance(item, dict):
-            continue
-        name = item.get("name") or ""
-        desc = item.get("description") or ""
-        if name and (USER_FACING_NAME_RE.search(name)
-                     or USER_FACING_DESC_RE.search(desc)):
-            matches.append(name)
-    if not matches:
-        return None
-    matches.sort(key=lambda n: (n in GENERIC_LABELS, n))
-    return matches[0]
-
-
-def _code_span(text):
-    """Render an author-controlled string (a file path or area name)
-    as an inline code span in a bot-posted comment: code spans
-    suppress @mentions and markdown, so a crafted path cannot fire
-    a mention or inject markup (Kody security finding on PR 26).
-    Backticks and newlines inside the value are neutralized so the
-    span cannot be broken out of."""
-    return "`" + text.replace("`", "'").replace("\r", " ") \
-        .replace("\n", " ") + "`"
-
-
-def codex_focus(d):
-    """Codex trigger comment body: the exact trigger string verbatim
-    on line 1 (so the mention parses as the review request, not a
-    free-form task), then Jev's specific concerns in the SAME comment
-    (owner correction 2026-10-28: less auto, more specific).
-
-    Since v2.1.0 the trigger ships via escalation_section() inside
-    the sticky; this stays as the reference rendering for it."""
-    lines = ["@codex security review", "",
-             "Jev context for this review:"]
-    band = d.get("security_band") or "unknown"
-    p = d.get("p_security_jev")
-    ptxt = f"{p:.2f}" if isinstance(p, (int, float)) else "n/a"
-    sec = f"- Security: band {band}, P {ptxt}"
-    blast = d.get("blast_radius")
-    if blast is not None:
-        sec += f", blast radius {blast} of 5"
-    cat = d.get("security_category")
-    if cat and cat != "none":
-        sec += f", area: {cat}"
-    lines.append(sec)
-    files = []
-    for h in (d.get("layer1") or {}).get("hits") or []:
-        if h.get("kind") == "path" and h.get("match") not in files:
-            files.append(h["match"])
-    if files:
-        lines.append("- Files of concern: "
-                     + ", ".join(_code_span(f) for f in files[:5]))
-    elif d.get("top_areas"):
-        lines.append("- Areas of concern: "
-                     + ", ".join(_code_span(a)
-                                 for a in d["top_areas"]))
-    if d.get("perf_flag"):
-        lines.append("- Performance risk also flagged by Jev")
-    return "\n".join(lines)
-
-
-def escalation_section(d):
-    """The Codex escalation block inside the sticky (v2.1.0, owner
-    call 2026-10-28): the trigger rides in the sticky instead of a
-    separate bot comment Codex ignores. The trigger string is an
-    exact line of its own; EVERY interpolated value is code-span
-    escaped (the PR #26 rule, all values), so no author-controlled
-    string can fire a mention or break out of its span."""
-    lines = ["---", "🔐 **Codex security review**", "",
-             "@codex security review", "", "Jev context for this review:"]
-    band = d.get("security_band") or "unknown"
-    p = d.get("p_security_jev")
-    ptxt = f"{p:.2f}" if isinstance(p, (int, float)) else "n/a"
-    sec = f"- Security: band {_code_span(str(band))}, P {ptxt}"
-    blast = d.get("blast_radius")
-    if isinstance(blast, (int, float)):
-        sec += f", blast radius {blast} of 5"
-    elif blast is not None:
-        sec += f", blast radius {_code_span(str(blast))}"
-    cat = d.get("security_category")
-    if cat and cat != "none":
-        sec += f", area: {_code_span(str(cat))}"
-    lines.append(sec)
-    files = []
-    for h in (d.get("layer1") or {}).get("hits") or []:
-        if h.get("kind") == "path" and h.get("match") not in files:
-            files.append(h["match"])
-    if files:
-        lines.append("- Files of concern: "
-                     + ", ".join(_code_span(str(f))
-                                 for f in files[:5]))
-    elif d.get("top_areas"):
-        lines.append("- Areas of concern: "
-                     + ", ".join(_code_span(str(a))
-                                 for a in d["top_areas"]))
-    if d.get("perf_flag"):
-        lines.append("- Performance risk also flagged by Jev")
-    return lines
-
-
-def escalation_comment(d):
-    """The would-be deep-review comment text (record-only mode: built
-    and logged, never posted). Review-only instruction first, then
-    Jev's specific concerns as the reviewer's focus list."""
-    concerns = []
-    cat = d.get("security_category")
-    if cat and cat != "none":
-        concerns.append(f"security area: {cat}")
-    if d.get("perf_flag"):
-        concerns.append("performance risk flagged by Jev")
-    if d.get("blast_radius") is not None:
-        concerns.append(f"blast radius {d['blast_radius']} of 5")
-    if d.get("top_areas"):
-        concerns.append("affected areas: "
-                        + ", ".join(_code_span(a)
-                                    for a in d["top_areas"]))
-    if d.get("themes"):
-        concerns.append("themes: " + ", ".join(d["themes"]))
-    focus = (" Focus on: " + "; ".join(concerns) + "."
-             if concerns else "")
-    return ESCALATION_COMMENT + focus
 
 
 def apply_decision(gh, bundle, d, comments=None, mention_gh=None,
@@ -468,6 +248,7 @@ def apply_decision(gh, bundle, d, comments=None, mention_gh=None,
     state.setdefault("issue_applied", [])
     state.setdefault("issue_number", None)
     state.setdefault("codex_posted", False)
+    state.setdefault("codex_standalone_posted", False)
     state.setdefault("runs", 0)
 
     # Repo label guard: the repo's live label list (fetched once in
@@ -561,15 +342,41 @@ def apply_decision(gh, bundle, d, comments=None, mention_gh=None,
         for c in comments)
     d["codex_posted_before"] = bool(state["codex_posted"]
                                     or already_mentioned)
-    # v2.1.0: no separate mention comment. The trigger renders
-    # into the sticky below; state["codex_posted"] in that sticky
-    # keeps it one-shot, and a failed sticky write never persists
-    # the state, so the next run retries the escalation.
+    # v2.1.0: the trigger renders into the sticky below;
+    # state["codex_posted"] in that sticky keeps it one-shot, and
+    # a failed sticky write never persists the state, so the next
+    # run retries the escalation.
+    # v2.2.0: the in-sticky mention alone is IGNORED by Codex
+    # (proven: embedded mentions delivered 0 reviews, including
+    # owner-authored ones; a standalone comment containing only
+    # the trigger line fired a completed review in minutes on
+    # repo-review #680 and megahealth #131). So an escalation now
+    # ALSO posts one standalone comment whose entire content is
+    # the trigger line, through the mention PAT client when wired
+    # (the proven identity), else the workflow token. The
+    # standalone goes FIRST: if it fails, the one-shot stays
+    # unspent and the sticky renders without the section; if it
+    # lands but the sticky then fails, the next run's dedupe scan
+    # sees the standalone comment and never reposts it.
     codex_now = bool(d["codex_post"] and not d["codex_posted_before"])
+    standalone_ok = False
+    if codex_now:
+        standalone_client = mention_gh if mention_gh is not None else gh
+        try:
+            standalone_client.call(
+                "POST", f"/repos/{repo}/issues/{pr_no}/comments",
+                {"body": "@codex security review"})
+            standalone_ok = True
+        except GhError as exc:
+            out["errors"].append(f"codex standalone comment: {exc}")
+    out["codex_standalone_posted"] = bool(codex_now and standalone_ok)
+    codex_claim = bool(codex_now and standalone_ok)
 
     state["pr_applied"] = sorted(set(state["pr_applied"]) | set(applied_pr))
     state["issue_applied"] = sorted(set(state["issue_applied"]) | set(applied_issue))
-    state["codex_posted"] = bool(state["codex_posted"] or codex_now)
+    state["codex_posted"] = bool(state["codex_posted"] or codex_claim)
+    state["codex_standalone_posted"] = bool(
+        state["codex_standalone_posted"] or codex_claim)
     state.setdefault("escalation_noted", False)
     if (d.get("escalation") or {}).get("would_fire"):
         state["escalation_noted"] = True
@@ -583,7 +390,7 @@ def apply_decision(gh, bundle, d, comments=None, mention_gh=None,
            for x in out["missing_pr"]]
         + [f"`{x}` (issue) is not a label in this repo"
            for x in out["missing_issue"]])
-    body = marker_body(state, d, applied_pr, applied_issue, codex_now,
+    body = marker_body(state, d, applied_pr, applied_issue, codex_claim,
                        issue_number=(issue or {}).get("number"),
                        skipped=skipped,
                        escalated=bool(state["codex_posted"]))
@@ -593,6 +400,7 @@ def apply_decision(gh, bundle, d, comments=None, mention_gh=None,
     # warnings would stay invisible until some later label change.
     show_worthy = bool(
         applied_pr or applied_issue or codex_now
+        or d.get("abstained")
         or out["missing_pr"] or out["missing_issue"]
         or d.get("perf_flag") or d.get("issue_ready_low")
         or d.get("user_impact") in ("visible", "behavior-changing")
@@ -643,9 +451,10 @@ def apply_decision(gh, bundle, d, comments=None, mention_gh=None,
         out["sticky_identity"] = (
             "owner-pat" if mention_gh is not None and used is mention_gh
             else "workflow-token")
-    # Claim the Codex delivery only when the sticky carrying the
-    # trigger actually landed; a failed write persists no state.
-    out["codex_posted_now"] = bool(codex_now and write_ok)
+    # Claim the Codex delivery only when the standalone trigger
+    # landed AND the sticky carrying the state actually landed; a
+    # failed write persists no state.
+    out["codex_posted_now"] = bool(codex_claim and write_ok)
     return out
 
 
@@ -700,6 +509,33 @@ def run(repo, pr_number, mode, workdir):
     except JevError as exc:
         record["jev_error"] = str(exc)
         warn(str(exc))
+    # v2.2.0 dedicated security call: the security questions are
+    # re-asked on a snippet-enriched state, and ITS answers govern
+    # the security band, warrant, and escalation concurrence in
+    # decide(). A failed security call (after its own retries)
+    # falls back to the main call's security answers: degraded
+    # security judgment, never a degraded run. Disable with
+    # JEV_SECURITY_CALL=0.
+    record["jev_security_call"] = "skipped"
+    if jev is not None and os.environ.get(
+            "JEV_SECURITY_CALL", "1") != "0":
+        try:
+            sec = call_jev(
+                build_security_state(bundle, l1),
+                os.environ.get("OPENROUTER_API_KEY"),
+                questions=security_questions(bundle))
+            answers = dict(jev.get("answers") or {})
+            sec_answers = sec.get("answers") or {}
+            for key in SECURITY_QUESTION_KEYS:
+                if key in sec_answers:
+                    answers[key] = sec_answers[key]
+            jev = dict(jev, answers=answers)
+            record["jev_security_call"] = "ok"
+            record["jev_security_usage"] = sec.get("usage")
+        except JevError as exc:
+            record["jev_security_call"] = "failed-fell-back"
+            record["jev_security_error"] = str(exc)
+            warn(f"security call failed, main answers kept: {exc}")
     comments, prior = None, None
     if mode == "apply":
         # Fetch the comment history once: decide() needs the marker
