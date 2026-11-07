@@ -1,69 +1,509 @@
----
-# Snyk replacement: per-PR fast secret+vulnerability scan plus a
-# weekly Trivy deep scan. Logic lives in the reusable workflow;
-# this file is just the triggers.
-# Reusable: webuildstuffio/repo-review
-#   .github/workflows/security-scan-reusable.yml@b33359a3c87c071ed564b40cc6987597d5a45f92
+# Vendored security scan. Do NOT replace with a `uses:` caller
+# while this repo is public.
 #
-# This caller replaces the vendored security-scan-opengrep.yml
-# (removed in the same change, 2026-11-05). The vendored copy
-# existed only because this repo was public and public repos
-# cannot call the private repo-review reusable (GitHub 422).
-# The repo is private now, so the standard fleet caller applies
-# directly. The vendored copy had also fallen behind the
-# reusable (v1.9.0 semantics vs v1.13.2 at the pin below), and
-# this repo had no Betterleaks or osv-scanner coverage at all;
-# the caller adds both, plus dashboard ingest. The Opengrep
-# p/ci gate stays on (opengrep_gate: true), matching the
-# enforcement the vendored file applied on PRs.
+# This repo is PUBLIC again (flipped back on 2026-11-07, the
+# change that closed the visibility issue tracked in this repo
+# under number 52, so that public consumers like XZ-Mods can
+# resolve this repo's composite actions). Public repos cannot
+# call reusable workflows in a private repo (GitHub 422 at
+# startup, zero jobs), and the fleet security-scan reusable
+# lives in the PRIVATE webuildstuffio/repo-review repo. The
+# thin caller that briefly replaced this file on 2026-11-05
+# (PR 46, written while the repo was private) failed exactly
+# that way on every run after the flip: last success
+# 2026-11-06 22:57 UTC while private, first failures
+# 2026-11-07 13:44 UTC, nine minutes after the flip back.
+#
+# Provenance: this is the vendored copy maintained in
+# webuildstuffio/.github (itself vendored from the reusable
+# below, and hardened there on Codex review), synced here
+# 2026-11-07. Sync manually when the reusable changes, the
+# same discipline as XZ-Mods' vendored metrics workflows.
+# Step structure, tool pins and scan logic follow the
+# reusable at:
+#   repo-review .github/workflows/security-scan-reusable.yml
+#   @ 660e4d50f013090d88cd994d971e0d31e53c599e (v1.3.0)
+#
+# Trigger posture: pull_request_target in the target-safe
+# shape (workflow and scripts from the base branch, the PR
+# head checked out explicitly and read only as scanner data,
+# no secrets beyond a contents:read token).
+#
+# Deliberate differences from the reusable:
+# - No tier resolution: that machinery maps the fleet's repos
+#   by tier; this copy carries a must-be-clean posture (any
+#   new Betterleaks finding, or any new HIGH/CRITICAL osv
+#   finding, fails the fast leg; the deep leg fails on any
+#   HIGH/CRITICAL Trivy finding too).
+# - No dashboard ingest step: ingest needs the private
+#   REPO_REVIEW_INGEST_TOKEN secret + REPO_REVIEW_URL variable
+#   for the repo-review dashboard. Results stay visible in
+#   the run summary + annotations instead.
+# - Sequential steps instead of the reusable's parallel group
+#   (same scanners, one less moving part in a vendored copy).
+# - The Opengrep SAST legs live in the sibling vendored file
+#   security-scan-opengrep.yml, restored alongside this file.
+# - Hardening deltas carried from the .github copy: the tool
+#   cache is restored for real on PR runs (never lookup-only,
+#   which reports a hit without downloading); scanner reports
+#   are validated (a missing report fails the job instead of
+#   reading as zero findings); OSV severities are computed
+#   from the CVSS vector; Trivy secret/license HIGH/CRITICAL
+#   findings count in the deep gate, not just
+#   vulnerabilities.
+#
+# Tools (checksum-verified release downloads, exact pins):
+#   Betterleaks 1.9.0, osv-scanner 2.6.0, Trivy 0.74.0
 
 name: security-scan
-"on":
+'on':
   pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, reopened, synchronize, ready_for_review]
   schedule:
-    - cron: "0 9 * * 1" # Mondays 09:00 UTC
+    - cron: '0 9 * * 1' # Mondays 09:00 UTC — weekly deep scan
   workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
-# Explicit per this repo's workflow convention (the vendored
-# file declared the same). The reusable declares no job
-# permissions of its own and needs nothing beyond this: it
-# checks out and reads files, annotates via workflow commands,
-# and ingests with its own token, not the caller's.
 permissions:
   contents: read
 
-jobs:
-  fast:
-    if: >-
-      github.event_name == 'pull_request_target' && github.event.pull_request.draft == false
-    uses: webuildstuffio/repo-review/.github/workflows/security-scan-reusable.yml@b33359a3c87c071ed564b40cc6987597d5a45f92 # yamllint disable-line
-    with:
-      # Opengrep SAST (repo-review#354): gate tier blocks on new
-      # ERRORs in the diff, as the vendored file did; breadth
-      # and zizmor report-only.
-      opengrep: true
-      opengrep_gate: true
-      zizmor: true
-    # `inherit`, never a named secret: the reusable declares no
-    # workflow_call secrets, and passing one by name fails
-    # workflow validation at startup (fleet-wide gate outage
-    # 2026-10-28).
-    # nosemgrep: yaml.github-actions.security.secrets-inherit.secrets-inherit
-    secrets: inherit
+env:
+  TOOLS_DIR: ${{ github.workspace }}/../security-tools
+  BETTERLEAKS_VERSION: "1.9.0"
+  OSV_SCANNER_VERSION: "2.6.0"
+  TRIVY_VERSION: "0.74.0"
 
-  deep:
+jobs:
+  scan:
     if: >-
-      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    uses: webuildstuffio/repo-review/.github/workflows/security-scan-reusable.yml@b33359a3c87c071ed564b40cc6987597d5a45f92
-    with:
-      deep: true
-      # The vendored file's weekly run was a full Opengrep
-      # scan; opengrep_deep keeps that leg in the reusable.
-      opengrep_deep: true
-    # nosemgrep: yaml.github-actions.security.secrets-inherit.secrets-inherit
-    secrets: inherit
+      github.event_name != 'pull_request_target' ||
+      github.event.pull_request.draft == false
+    runs-on: ${{ vars.CI_RUNNER || 'ubicloud-standard-2' }}
+    timeout-minutes: 15
+    concurrency:
+      group: security-scan-vendored-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # history needed for range scan
+          # pull_request_target would check out the base branch
+          # by default; pin the PR head so the scan sees the
+          # change. The tree is read only as scanner data (no
+          # build, no repo scripts run) — the target-safety
+          # criteria from the repo-review reusable audit.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Determine base, head and scan kind
+        id: scope
+        run: |
+          set -euo pipefail
+          EVENT="${{ github.event_name }}"
+          if [ "$EVENT" = "pull_request_target" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          else
+            BASE=""
+            HEAD_SHA="${{ github.sha }}"
+          fi
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          echo "head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT" = "pull_request_target" ]; then
+            echo "deep=false" >> "$GITHUB_OUTPUT"
+            echo "kind=pr-fast" >> "$GITHUB_OUTPUT"
+          else
+            echo "deep=true" >> "$GITHUB_OUTPUT"
+            echo "kind=weekly-deep" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deep-scan skip-if-quiet gate
+        id: activity
+        if: steps.scope.outputs.deep == 'true'
+        run: |
+          if [ -z "$(git log --since='7 days ago' --format=%H)" ]; then
+            echo "active=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping deep scan: no commits in 7 days."
+          else
+            echo "active=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve tool cache path
+        id: toolpath
+        if: steps.activity.outputs.active != 'false'
+        run: |
+          parent="$(dirname "$GITHUB_WORKSPACE")"
+          echo "dir=$parent/security-tools" >> "$GITHUB_OUTPUT"
+
+      - name: Restore tool cache
+        id: toolcache
+        if: steps.activity.outputs.active != 'false'
+        # actions/cache v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ steps.toolpath.outputs.dir }}
+          key: >-
+            security-tools-v2-bl${{ env.BETTERLEAKS_VERSION }}-osv${{
+            env.OSV_SCANNER_VERSION }}-trivy${{ env.TRIVY_VERSION }}-${{
+            runner.os }}-${{ runner.arch }}
+      - name: Install tools (cold cache only)
+        if: >-
+          steps.activity.outputs.active != 'false' &&
+          steps.toolcache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$TOOLS_DIR/bin"
+          dir="$(mktemp -d)"
+          trap 'rm -rf "$dir"' EXIT
+          arch="x64"
+          base="https://github.com/betterleaks/betterleaks/releases"
+          base="$base/download/v$BETTERLEAKS_VERSION"
+          bl_tgz="betterleaks_${BETTERLEAKS_VERSION}_linux_${arch}.tar.gz"
+          curl -fsSL --retry 3 -o "$dir/$bl_tgz" "$base/$bl_tgz"
+          curl -fsSL --retry 3 -o "$dir/bl-checksums.txt" \
+            "$base/checksums.txt"
+          (cd "$dir" && grep "linux_${arch}.tar.gz$" bl-checksums.txt \
+            | sha256sum --check -)
+          tar -xzf "$dir/$bl_tgz" -C "$TOOLS_DIR/bin" betterleaks
+          base="https://github.com/google/osv-scanner/releases"
+          base="$base/download/v$OSV_SCANNER_VERSION"
+          curl -fsSL --retry 3 -o "$dir/osv-scanner_linux_amd64" \
+            "$base/osv-scanner_linux_amd64"
+          curl -fsSL --retry 3 -o "$dir/osv-sums" \
+            "$base/osv-scanner_SHA256SUMS"
+          (cd "$dir" && grep "osv-scanner_linux_amd64$" osv-sums \
+            | sha256sum --check -)
+          install -m 755 "$dir/osv-scanner_linux_amd64" \
+            "$TOOLS_DIR/bin/osv-scanner"
+          base="https://github.com/aquasecurity/trivy/releases"
+          base="$base/download/v$TRIVY_VERSION"
+          trivy_tgz="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -fsSL --retry 3 -o "$dir/$trivy_tgz" "$base/$trivy_tgz"
+          curl -fsSL --retry 3 -o "$dir/trivy-checksums.txt" \
+            "$base/trivy_${TRIVY_VERSION}_checksums.txt"
+          (cd "$dir" && grep "Linux-64bit.tar.gz$" trivy-checksums.txt \
+            | sha256sum --check -)
+          tar -xzf "$dir/$trivy_tgz" -C "$TOOLS_DIR/bin" trivy
+          "$TOOLS_DIR/bin/betterleaks" version
+          "$TOOLS_DIR/bin/osv-scanner" --version
+
+      - name: Save tool cache (trusted deep runs only)
+        if: >-
+          steps.activity.outputs.active != 'false' &&
+          steps.toolcache.outputs.cache-hit != 'true' &&
+          steps.scope.outputs.deep == 'true' &&
+          github.ref ==
+            format('refs/heads/{0}',
+              github.event.repository.default_branch)
+        # actions/cache v6.1.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ steps.toolpath.outputs.dir }}
+          key: ${{ steps.toolcache.outputs.cache-primary-key }}
+
+      - name: Add tools to PATH
+        if: steps.activity.outputs.active != 'false'
+        run: echo "$TOOLS_DIR/bin" >> "$GITHUB_PATH"
+
+      # Fail-closed guard (vendored hardening, Codex review on
+      # PR #13): the scan steps below tolerate scanner exit codes
+      # (findings are data, not errors), so a missing binary would
+      # otherwise manufacture empty reports and a green check.
+      # Verify every scanner this run needs actually executes.
+      - name: Verify tools are present
+        if: steps.activity.outputs.active != 'false'
+        run: |
+          set -euo pipefail
+          betterleaks version
+          osv-scanner --version
+          if [ "${{ steps.scope.outputs.deep }}" = "true" ]; then
+            trivy --version
+          fi
+
+      - name: Betterleaks secret scan (diff-only on fast path)
+        id: betterleaks
+        if: steps.activity.outputs.active != 'false'
+        run: |
+          set -uo pipefail
+          start=$SECONDS
+          BASE="${{ steps.scope.outputs.base }}"
+          HEAD_SHA="${{ steps.scope.outputs.head }}"
+          if [ "${{ steps.scope.outputs.deep }}" != "true" ] \
+            && [ -n "$BASE" ] \
+            && git cat-file -e "$BASE" 2>/dev/null; then
+            betterleaks git --log-opts "$BASE..$HEAD_SHA" \
+              --report-format json \
+              --report-path /tmp/betterleaks.json --exit-code 0 \
+              --redact=100 . 2>/dev/null || true
+          else
+            betterleaks git --report-format json \
+              --report-path /tmp/betterleaks.json --exit-code 0 \
+              --redact=100 . 2>/dev/null || true
+          fi
+          # A missing/unparseable report is a scanner failure,
+          # not "zero findings" — fail closed (PR #13 review).
+          if [ ! -f /tmp/betterleaks.json ] \
+            || ! jq -e 'type == "array"' /tmp/betterleaks.json \
+              >/dev/null 2>&1; then
+            echo "::error::betterleaks produced no valid report"
+            exit 1
+          fi
+          echo "duration=$((SECONDS - start))" >> "$GITHUB_OUTPUT"
+          total=$(jq 'if type == "array" then length else 0 end' \
+            /tmp/betterleaks.json 2>/dev/null || echo 0)
+          echo "total=$total" >> "$GITHUB_OUTPUT"
+          echo "new=$total" >> "$GITHUB_OUTPUT"
+          echo "betterleaks: total=$total new=$total"
+
+      - name: osv-scanner vulnerability scan
+        id: osv
+        if: steps.activity.outputs.active != 'false'
+        run: |
+          set -uo pipefail
+          start=$SECONDS
+          osv-scanner scan source -r . --format json \
+            --output-file /tmp/osv-head.json 2>/dev/null || true
+          [ -f /tmp/osv-head.json ] || echo '{"results":[]}' \
+            > /tmp/osv-head.json
+          BASE="${{ steps.scope.outputs.base }}"
+          if [ -n "$BASE" ] \
+            && [ "${{ steps.scope.outputs.deep }}" != "true" ]; then
+            git worktree add --detach /tmp/osv-base "$BASE" \
+              >/dev/null 2>&1
+            (cd /tmp/osv-base && osv-scanner scan source -r . \
+              --format json --output-file /tmp/osv-base.json \
+              2>/dev/null) || true
+            git worktree remove --force /tmp/osv-base
+            [ -f /tmp/osv-base.json ] || echo '{"results":[]}' \
+              > /tmp/osv-base.json
+          else
+            echo '{"results":[]}' > /tmp/osv-base.json
+          fi
+          extract() {
+            jq -r '
+              # OSV severity[].score is a CVSS *vector* string
+              # (e.g. "CVSS:3.1/AV:N/AC:L/..."), not a number —
+              # the reusable plain `tonumber?` dropped every
+              # vector-scored vuln to "unknown" (PR #13 review).
+              # Compute the CVSS v3.x base score from the vector
+              # (FIRST v3.1 spec, section 7 equations); numeric
+              # scores pass through; GHSA database_specific
+              # severity is the fallback for v2/v4 vectors.
+              def roundup: ((. * 10 - 0.0000001) | ceil) / 10;
+              def vmap($vec; $k):
+                ($vec | split("/")
+                 | map(split(":"))
+                 | map({(.[0]): .[1]}) | add)[$k] // "";
+              def cvss3($score):
+                ($score | sub("^CVSS:3\\.[01]/"; "")) as $vec
+                | ({N: 0.85, A: 0.62, L: 0.55, P: 0.2}
+                    [vmap($vec; "AV")] // 0) as $av
+                | ({L: 0.77, H: 0.44}
+                    [vmap($vec; "AC")] // 0) as $ac
+                | (vmap($vec; "S")) as $s
+                | ((if $s == "C"
+                    then {N: 0.85, L: 0.68, H: 0.50}
+                    else {N: 0.85, L: 0.62, H: 0.27} end)
+                    [vmap($vec; "PR")] // 0) as $pr
+                | ({N: 0.85, R: 0.62}
+                    [vmap($vec; "UI")] // 0) as $ui
+                | ({H: 0.56, L: 0.22, N: 0}
+                    [vmap($vec; "C")] // 0) as $c
+                | ({H: 0.56, L: 0.22, N: 0}
+                    [vmap($vec; "I")] // 0) as $i
+                | ({H: 0.56, L: 0.22, N: 0}
+                    [vmap($vec; "A")] // 0) as $a
+                | (1 - (1 - $c) * (1 - $i) * (1 - $a)) as $iss
+                | (if $s == "C"
+                   then 7.52 * ($iss - 0.029)
+                     - 3.25 * pow($iss - 0.02; 15)
+                   else 6.42 * $iss end) as $impact
+                | (8.22 * $av * $ac * $pr * $ui) as $expl
+                | if $impact <= 0 then 0
+                  elif $s == "C"
+                  then ([1.08 * ($impact + $expl), 10] | min
+                    | roundup)
+                  else ([$impact + $expl, 10] | min | roundup)
+                  end;
+              def score_of($sev):
+                if ($sev.score
+                    | test("^[0-9]+(\\.[0-9]+)?$"))
+                then ($sev.score | tonumber)
+                elif ($sev.score | startswith("CVSS:3"))
+                then cvss3($sev.score)
+                else 0 end;
+              def cvss: ([.severity[]? | score_of(.)]
+                | max // 0);
+              def ghsa:
+                (.database_specific.severity // ""
+                 | ascii_downcase
+                 | {critical: "critical", high: "high",
+                    moderate: "medium", medium: "medium",
+                    low: "low"}[.] // "");
+              def band($s):
+                if $s >= 9 then "critical"
+                elif $s >= 7 then "high"
+                elif $s >= 4 then "medium"
+                elif $s > 0 then "low"
+                else "" end;
+              def sev:
+                ([band(cvss), ghsa] | map(select(. != ""))
+                 | if index("critical") then "critical"
+                   elif index("high") then "high"
+                   elif index("medium") then "medium"
+                   elif index("low") then "low"
+                   else "unknown" end);
+              .results[]?.packages[]?
+              | .package as $p
+              | .vulnerabilities[]?
+              | "\($p.ecosystem // "?")|\($p.name)|\($p.version)"
+                + " |\(.id)|\(sev)"' "$1" | sort -u
+          }
+          extract /tmp/osv-head.json > /tmp/osv-head.txt
+          extract /tmp/osv-base.json > /tmp/osv-base.txt
+          comm -23 /tmp/osv-head.txt /tmp/osv-base.txt \
+            > /tmp/osv-new.txt || true
+          count() { grep -c "|$1$" "$2" || true; }
+          {
+            echo "duration=$((SECONDS - start))"
+            echo "high=$(count high /tmp/osv-head.txt)"
+            echo "critical=$(count critical /tmp/osv-head.txt)"
+            echo "new_high=$(count high /tmp/osv-new.txt)"
+            echo "new_critical=$(count critical /tmp/osv-new.txt)"
+          } >> "$GITHUB_OUTPUT"
+          echo "osv: $(wc -l < /tmp/osv-new.txt) new vulns"
+
+      - name: Trivy deep scan (weekly only)
+        id: trivy
+        if: >-
+          steps.activity.outputs.active != 'false' &&
+          steps.scope.outputs.deep == 'true'
+        run: |
+          set -uo pipefail
+          export TRIVY_CACHE_DIR="$TOOLS_DIR/.trivy-cache"
+          start=$SECONDS
+          trivy fs --scanners vuln,secret,license \
+            --format json --output /tmp/trivy.json . \
+            2>/dev/null || true
+          # Fail closed on a missing/unparseable report, same
+          # as the Betterleaks step (PR #13 review).
+          if [ ! -f /tmp/trivy.json ] \
+            || ! jq -e 'type == "object"' /tmp/trivy.json \
+              >/dev/null 2>&1; then
+            echo "::error::trivy produced no valid report"
+            exit 1
+          fi
+          # Count all three scanner classes, not just vulns:
+          # Secrets[] and Licenses[] carry Severity too, and
+          # the deep gate below claims all three (PR #13).
+          {
+            echo "duration=$((SECONDS - start))"
+            echo "high=$(jq \
+              '[.Results[]?.Vulnerabilities[]?
+                | select(.Severity == "HIGH")] | length' \
+              /tmp/trivy.json)"
+            echo "critical=$(jq \
+              '[.Results[]?.Vulnerabilities[]?
+                | select(.Severity == "CRITICAL")] | length' \
+              /tmp/trivy.json)"
+            echo "secret_high=$(jq \
+              '[.Results[]?.Secrets[]?
+                | select(.Severity == "HIGH")] | length' \
+              /tmp/trivy.json)"
+            echo "secret_critical=$(jq \
+              '[.Results[]?.Secrets[]?
+                | select(.Severity == "CRITICAL")] | length' \
+              /tmp/trivy.json)"
+            echo "license_high=$(jq \
+              '[.Results[]?.Licenses[]?
+                | select(.Severity == "HIGH")] | length' \
+              /tmp/trivy.json)"
+            echo "license_critical=$(jq \
+              '[.Results[]?.Licenses[]?
+                | select(.Severity == "CRITICAL")] | length' \
+              /tmp/trivy.json)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Scan summary
+        if: steps.activity.outputs.active != 'false'
+        run: |
+          {
+            echo "## Security scan (${{ steps.scope.outputs.kind }})"
+            echo "vendored (retained past the reusable; no ingest)"
+            echo ""
+            echo "| Scanner | Findings | New vs base | Time |"
+            echo "|---------|----------|-------------|------|"
+            echo "| betterleaks (secrets) | \
+              ${{ steps.betterleaks.outputs.total }} | \
+              ${{ steps.betterleaks.outputs.new }} | \
+              ${{ steps.betterleaks.outputs.duration }}s |"
+            echo "| osv-scanner (deps) | \
+              ${{ steps.osv.outputs.high }} high, \
+              ${{ steps.osv.outputs.critical }} critical | \
+              ${{ steps.osv.outputs.new_high }} high, \
+              ${{ steps.osv.outputs.new_critical }} critical | \
+              ${{ steps.osv.outputs.duration }}s |"
+            if [ "${{ steps.scope.outputs.deep }}" = "true" ]; then
+              echo "| trivy (deep) | \
+                ${{ steps.trivy.outputs.high }} high, \
+                ${{ steps.trivy.outputs.critical }} critical vuln; \
+                ${{ steps.trivy.outputs.secret_high }} high, \
+                ${{ steps.trivy.outputs.secret_critical }} \
+                critical secret; \
+                ${{ steps.trivy.outputs.license_high }} high, \
+                ${{ steps.trivy.outputs.license_critical }} \
+                critical license | n/a | \
+                ${{ steps.trivy.outputs.duration }}s |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          new_leaks=${{ steps.betterleaks.outputs.new }}
+          if [ "${new_leaks:-0}" -gt 0 ]; then
+            jq -r 'if type == "array" then
+                .[:20][] |
+                "::error file=\(.File)::betterleaks: " +
+                "\(.RuleID) finding (\((.Commit // "")[0:8]))"
+              else empty end' /tmp/betterleaks.json
+          fi
+          new_crit=${{ steps.osv.outputs.new_critical }}
+          new_high=${{ steps.osv.outputs.new_high }}
+          if [ "${new_crit:-0}" -gt 0 ] \
+            || [ "${new_high:-0}" -gt 0 ]; then
+            awk -F'|' '$5 ~ /^(high|critical)$/ \
+              {printf "::error::osv-scanner: new %s %s in %s@%s\n", \
+              $5, $4, $2, $3}' /tmp/osv-new.txt | head -20
+          fi
+
+      - name: Fail on findings
+        if: >-
+          steps.activity.outputs.active != 'false' &&
+          (steps.betterleaks.outputs.total > 0 ||
+           steps.osv.outputs.new_high > 0 ||
+           steps.osv.outputs.new_critical > 0 ||
+           (steps.scope.outputs.deep == 'true' &&
+            (steps.osv.outputs.high > 0 ||
+             steps.osv.outputs.critical > 0 ||
+             steps.trivy.outputs.high > 0 ||
+             steps.trivy.outputs.critical > 0 ||
+             steps.trivy.outputs.secret_high > 0 ||
+             steps.trivy.outputs.secret_critical > 0 ||
+             steps.trivy.outputs.license_high > 0 ||
+             steps.trivy.outputs.license_critical > 0)))
+        run: |
+          echo "Security scan findings (must-be-clean):"
+          echo "  betterleaks=${{ steps.betterleaks.outputs.total }}"
+          echo "  osv new: ${{ steps.osv.outputs.new_high }} high / \
+            ${{ steps.osv.outputs.new_critical }} critical"
+          echo "  osv head: ${{ steps.osv.outputs.high }} high / \
+            ${{ steps.osv.outputs.critical }} critical"
+          echo "  trivy: ${{ steps.trivy.outputs.high }} high / \
+            ${{ steps.trivy.outputs.critical }} critical vuln, \
+            ${{ steps.trivy.outputs.secret_high }} high / \
+            ${{ steps.trivy.outputs.secret_critical }} critical \
+            secret, ${{ steps.trivy.outputs.license_high }} high / \
+            ${{ steps.trivy.outputs.license_critical }} critical \
+            license"
+          exit 1
