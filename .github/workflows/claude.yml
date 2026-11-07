@@ -18,7 +18,6 @@ on:
   pull_request:
     types: [closed]
 
-
 jobs:
   claude:
     # Same-issue re-triggers supersede: cancel the stale run instead of
@@ -945,4 +944,3 @@ jobs:
                 if (e.status !== 404) throw e;
               }
             }
-
